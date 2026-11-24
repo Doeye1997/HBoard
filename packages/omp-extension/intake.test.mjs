@@ -57,6 +57,22 @@ test("wait uses the upstream exact current-actor filter with the pinned endpoint
     { cwd: "/project", signal, timeout: 660000 }]);
 });
 
+test("a quiet wait and a deadline kill keep listening; a Board error keeps its reason", async () => {
+  const signal = new AbortController().signal;
+  const quiet = { exec: async () => ({ code: 1, stdout: JSON.stringify({ reason: "timeout", message: "Nothing matched" }), stderr: "", killed: false }) };
+  assert.equal(await waitForMention(quiet, { cwd: "/project" }, scope, "head", signal), null);
+  const killed = { exec: async () => ({ code: 1, stdout: "", stderr: "", killed: true }) };
+  assert.equal(await waitForMention(killed, { cwd: "/project" }, scope, "head", signal), null);
+  const failed = { exec: async () => ({ code: 1, killed: false, stderr: "", stdout: JSON.stringify({
+    reason: "not_supported", message: "See https://secret.example/x and person@example.com",
+  }) }) };
+  await assert.rejects(
+    waitForMention(failed, { cwd: "/project" }, scope, "head", signal),
+    /Board wait failed: not_supported: See \[url\] and \[email\] \(exit 1\); intake stopped/,
+  );
+});
+
+
 test("reply guidance uses the same Board URL and profile and the incoming message ID", () => {
   const pinned = { ...scope, board: "https://board.example/v1/boards/brd_1?teamId=team_1" };
   const message = { ...posted("m", "c").event.message, thread: "thread-not-message-id" };
