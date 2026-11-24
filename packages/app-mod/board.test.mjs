@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, readArgs, createSend, sendArgs, parseReply, actorProfile, bindingTarget, signature, threadSummary, readMarker, isUnread, toggleFollow } from "./mods/hboard/board.js";
+import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, signature, threadSummary, readMarker, isUnread, toggleFollow } from "./mods/hboard/board.js";
 const scope = { board: "https://board.example/v1/boards/b?teamId=t", actor: "person", handle: "me" };
 const actor = { id: "person+worker", handle: "me/worker" };
 const root = { id: "msg_1", channel: "dev", version: 1, text: "root" };
@@ -15,9 +15,23 @@ test("connect uses the authenticated human and canonical endpoint", () => {
   assert.equal(sameHuman(scope, { ...scope, actor: "other" }), false);
 });
 
-test("native reads preserve Board scope, exact human Inbox and message ID", () => {
-  assert.deepEqual(argv("read", { board: scope.board, ...readArgs({ kind: "inbox" }) }),
-    ["board", "read", "--url", scope.board, "--json", "--mentions", "me", "--limit", "30"]);
+test("inbox queries one loaded channel and does not claim a whole-board read", () => {
+  assert.deepEqual(argv("read", { board: scope.board, ...inboxMentionArgs("dev") }),
+    ["board", "read", "--url", scope.board, "--json", "--mentions", "me", "--limit", "30", "--", "dev"]);
+  assert.deepEqual(inboxPageArgs("dev"), { flags: ["--limit", "30"], args: ["dev"] });
+  assert.throws(() => readArgs({ kind: "inbox" }), /loaded channel/);
+  assert.equal(mentionsHuman("wake @me now", scope), true);
+  assert.equal(mentionsHuman("wake @me/worker", scope), false);
+  assert.equal(mentionsHuman("id person-1 is here", { handle: "other", actor: "person-1" }), true);
+  assert.equal(mentionsHuman("short", { handle: "other", actor: "person" }), false);
+  assert.match(inboxCoverage("query", 2, true), /2 loaded channels; more channels are not loaded/);
+  assert.match(inboxCoverage("scan", 1, false), /no mention index/);
+  assert.match(inboxCoverage("scan", 0, false), /No channels loaded/);
+  assert.deepEqual(dedupeThreads([
+    { message: { id: "b", createdAt: "2020-01-01" } },
+    { message: { id: "a", createdAt: "2021-01-01" } },
+    { message: { id: "a", createdAt: "2021-01-01" } },
+  ]).map(thread => thread.message.id), ["a", "b"]);
   assert.deepEqual(readArgs({ kind: "thread", id: "msg_1", thread: "not-message-id" }), { args: ["msg_1"] });
   assert.deepEqual(readArgs({ kind: "channel", channel: "dev", before: "older" }),
     { flags: ["--limit", "30", "--before", "older"], args: ["dev"] });

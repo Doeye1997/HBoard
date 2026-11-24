@@ -1,7 +1,7 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { exec, appHome, checking, props, run, theme, terminals, window } from "herdr";
-import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, readArgs, createSend, sendArgs, parseReply, actorProfile, bindingTarget, messageName, threadSummary, readMarker, isUnread, toggleFollow } from "./board.js";
+import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, messageName, threadSummary, readMarker, isUnread, toggleFollow } from "./board.js";
 
 // Adopt the Herdr native theme and the spacing/typography scale of its panels.
 const UI = { rail: 216, pad: 12, gap: 8, row: 30, radius: 7, small: 11.5, text: 13, heading: 16, composer: 92 };
@@ -42,6 +42,7 @@ export default class HBoard extends View {
     this.actors = [];
     this.nextChannel = null;
     this.route = { kind: "inbox" };
+    this.inboxNote = "";
     this.data = null;
     this.seq = 0;
     this.focusSeq = 0;
@@ -78,6 +79,7 @@ export default class HBoard extends View {
     const seq = ++this.seq;
     this.scope = null;
     this.transport = null;
+    this.inboxNote = "";
     this.data = null;
     this.connecting = true;
     this.loading = false;
@@ -135,6 +137,29 @@ export default class HBoard extends View {
     else this.refresh(cx, route.kind === "thread");
   }
 
+  async readInbox(scope) {
+    const channels = this.channels.map(channel => channel?.path).filter(path => typeof path === "string" && path && !path.startsWith("-"));
+    const more = !!this.nextChannel;
+    if (!channels.length) return { threads: [], note: inboxCoverage("scan", 0, more) };
+    const mention = await Promise.all(channels.map(async channel => {
+      try { return { ok: true, data: await this.cli("read", scope.board, inboxMentionArgs(channel)) }; }
+      catch (error) { return { ok: false, error }; }
+    }));
+    const unsupported = mention.every(item => !item.ok && /not_supported/.test(String(item.error?.message ?? "")));
+    if (unsupported) {
+      const pages = await Promise.all(channels.map(channel => this.cli("read", scope.board, inboxPageArgs(channel))));
+      const threads = dedupeThreads(pages.flatMap(page => array(page.threads, "threads").filter(thread => mentionsHuman(thread?.message?.text, scope))));
+      return { threads, note: inboxCoverage("scan", channels.length, more) };
+    }
+    const failed = mention.find(item => !item.ok);
+    if (failed) throw failed.error;
+    return {
+      threads: dedupeThreads(mention.flatMap(item => array(item.data.threads, "threads"))),
+      note: inboxCoverage("query", channels.length, more),
+    };
+  }
+
+
   refresh(cx, mark = false) {
     if (checking() || !this.scope || this.loading || this.sending || this.route.kind === "following") return;
     const scope = this.scope, route = this.route, seq = ++this.seq;
@@ -143,14 +168,17 @@ export default class HBoard extends View {
     cx.notify();
     cx.spawn(async cx => {
       try {
-        const data = await this.cli("read", scope.board, readArgs(route));
+        const data = route.kind === "inbox" ? await this.readInbox(scope) : await this.cli("read", scope.board, readArgs(route));
         if (seq !== this.seq || !sameHuman(scope, this.scope)) return;
         if (route.kind === "thread") {
           if (data.message?.id !== route.id) throw Error("Board returned a different thread root");
           array(data.replies, "replies");
           if (mark) { this.prefs = readMarker(this.prefs, threadSummary(data)); this.savePrefs(); }
+        } else if (route.kind === "inbox") {
+          this.inboxNote = data.note;
+          this.data = { threads: data.threads };
         } else array(data.threads, "threads");
-        this.data = data;
+        if (route.kind !== "inbox") this.data = data;
       } catch (error) {
         if (seq === this.seq) this.readError = errorText(error);
       } finally {
@@ -351,11 +379,11 @@ export default class HBoard extends View {
         .child(h_flex().items_center().gap(UI.gap).flex_none()
           .child(div().flex_1().min_w(0).truncate().font_semibold().text_size(UI.heading).child(connected ? title : "Connect Board"))
           .when(connected, e => e.child(button("refresh", this.loading ? "Reading…" : "Refresh", t, (_e, cx) => this.refresh(cx), !this.loading && !this.sending && route.kind !== "following")))
+          .when(!connected, e => e.child(button("connect", this.connecting ? "Connecting…" : "Connect", t, (_e, cx) => this.connect(cx), !this.connecting, true)))
           .child(button("herdr", "Herdr", t, () => run("layout.switch", { name: "main" }))))
-        .when(!connected, e => e.child(v_flex().gap(UI.gap)
+        .when(!connected, e => e.child(v_flex().gap(UI.gap).flex_none()
           .child(label("Use the existing Vercel CLI login, as a human, or enter a Board endpoint. No credentials are stored here.", t))
-          .child(Input.new(this.endpoint).h(36).px(UI.gap).rounded(UI.radius).border_1().border_color(t.input).bg(t.surface).text_color(t.foreground))
-          .child(button("connect", this.connecting ? "Connecting…" : "Connect", t, (_e, cx) => this.connect(cx), !this.connecting, true))))
+          .child(Input.new(this.endpoint).h(36).px(UI.gap).rounded(UI.radius).border_1().border_color(t.input).bg(t.surface).text_color(t.foreground))))
         .when(connected, e => e
           .child(h_flex().items_center().gap(UI.gap).flex_none()
             .child(div().flex_1().min_w(0).truncate().text_size(UI.small).text_color(t.dim).child(this.scope.board))
@@ -365,7 +393,7 @@ export default class HBoard extends View {
             .child(button("back", "Channel", t, (_e, cx) => this.navigate({ kind: "channel", channel: route.channel }, cx), !this.pending && !this.sending))
             .when(!!thread, e => e.child(button("mark-read", "Mark read", t, (_e, cx) => { this.prefs = readMarker(this.prefs, threadSummary(this.data)); this.savePrefs(); cx.notify(); })))
             .when(!!thread, e => e.child(button("follow", this.prefs.followed.some(x => x.id === thread.id) ? "Unfollow" : "Follow", t, (_e, cx) => { this.prefs = toggleFollow(this.prefs, thread); this.savePrefs(); cx.notify(); })))))
-          .when(route.kind === "inbox", e => e.child(label("Recent Board mention threads · local unread marks, not a complete notification queue", t)))
+          .when(route.kind === "inbox", e => e.child(label(this.inboxNote || "Inbox covers only loaded channels and is not a complete mention history.", t)))
           .when(route.kind === "channel" && !!route.before, e => e.child(button("latest", "Back to latest", t, (_e, cx) => this.navigate({ kind: "channel", channel: route.channel }, cx), !this.pending && !this.sending)))
           .child(v_flex().id("hboard-content").flex_1().min_h(0).overflow_y_scrollbar().child(this.content(t)))
           .when(!!this.readError, e => e.child(div().text_color(t.blocked ?? t.foreground).child("Read failed" + (this.data ? " (last loaded data)" : "") + ": " + this.readError)))

@@ -31,13 +31,55 @@ export function boardInvocation(transport, args) {
   return { command: transport.command, args: [...transport.prefix, ...args] };
 }
 
+function channelName(value) {
+  if (typeof value !== "string" || !value || value.startsWith("-")) throw Error("Invalid channel");
+  return value;
+}
+
+// Hosted boards may reject mention reads. Callers query one loaded channel at a time.
+export function inboxMentionArgs(channel) {
+  return { flags: ["--mentions", "me", "--limit", "30"], args: [channelName(channel)] };
+}
+
+export function inboxPageArgs(channel) {
+  return { flags: ["--limit", "30"], args: [channelName(channel)] };
+}
+
 export function readArgs(route) {
   if (route.kind === "thread") return { args: [route.id] };
-  if (route.kind === "inbox") return { flags: ["--mentions", "me", "--limit", "30"] };
+  if (route.kind === "inbox") throw Error("Inbox reads each loaded channel; it has no whole-board query");
   if (route.kind === "channel") return {
     flags: ["--limit", "30", ...(route.before ? ["--before", route.before] : [])], args: [route.channel],
   };
   throw Error("Unknown Board view");
+}
+
+// A profile mention contains the person handle before a slash. That is not a mention of the person.
+export function mentionsHuman(text, scope) {
+  if (typeof text !== "string" || !scope) return false;
+  const handle = String(scope.handle ?? "").replace(/^@/, "");
+  if (handle) {
+    const escaped = handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp("(^|[^A-Za-z0-9_])@" + escaped + "(?![A-Za-z0-9_/-])").test(text)) return true;
+  }
+  const actor = scope.actor;
+  return typeof actor === "string" && actor.length >= 8 && text.includes(actor);
+}
+
+export function inboxCoverage(mode, count, more) {
+  const loaded = count + " loaded channel" + (count === 1 ? "" : "s") + (more ? "; more channels are not loaded" : "");
+  if (!count) return "No channels loaded" + (more ? "; more channels are not loaded" : "") + ". Not a complete inbox.";
+  if (mode === "query") return "Mention query, latest 30 threads in each of " + loaded + ". Not a complete inbox.";
+  return "This board has no mention index. Mentions found in the latest 30 thread roots of " + loaded + ". Replies outside those roots are not included. Not a complete inbox.";
+}
+
+export function dedupeThreads(threads) {
+  const byId = new Map();
+  for (const thread of threads) {
+    const id = thread?.message?.id;
+    if (typeof id === "string" && !byId.has(id)) byId.set(id, thread);
+  }
+  return [...byId.values()].sort((a, b) => String(b?.message?.createdAt ?? "").localeCompare(String(a?.message?.createdAt ?? "")));
 }
 
 export function createSend(scope, route, text, key) {
