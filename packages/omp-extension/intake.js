@@ -164,17 +164,47 @@ function parseOutput(value) {
   }
 }
 
+function boardBody(result) {
+  try {
+    return parseOutput(String(result?.stdout ?? "")) ?? parseOutput(String(result?.stderr ?? ""));
+  } catch {
+    return null;
+  }
+}
+
+function safeBoardSummary(value) {
+  return String(value ?? "")
+    .replace(/https?:\/\/\S+/gi, "[url]")
+    .replace(/\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g, "[email]")
+    .replace(/[^\S\n]+/g, " ")
+    .trim()
+    .slice(0, 160);
+}
+
+function boardFailure(command, result, data) {
+  const reason = typeof data?.reason === "string" && /^[a-z][a-z0-9_]*$/.test(data.reason) ? data.reason : "";
+  const nested = data?.data?.error;
+  const summary = safeBoardSummary(typeof data?.message === "string" ? data.message : nested?.message);
+  let text = "Board " + command + " failed";
+  if (reason) text += ": " + reason;
+  if (summary) text += ": " + summary;
+  return new Error(text + " (exit " + result.code + "); intake stopped");
+}
+
 async function board(pi, ctx, args, profile, url, signal) {
   const result = await pi.exec("vercel", [
     "board", ...args, "--as", profile, ...(url ? ["--url", url] : []), "--json",
   ], { cwd: ctx.cwd, signal, timeout: 660000 });
   signal.throwIfAborted();
-  const data = parseOutput(result.stdout);
+  const data = boardBody(result);
   if (result.code === 0 && data) return data;
-  if (args[0] === "wait" && !result.killed && result.code === 1 &&
-      (data ?? parseOutput(result.stderr))?.reason === "timeout") return null;
-  // Do not leak arbitrary CLI output into terminal notifications.
-  throw new Error("Board " + args[0] + " failed (exit " + result.code + "); intake stopped");
+  if (args[0] === "wait") {
+    // A quiet official wait is not a failure. A deadline kill with no Board
+    // reason is the same: keep listening instead of hiding the next cause.
+    if (data?.reason === "timeout") return null;
+    if (result.killed && !data?.reason) return null;
+  }
+  throw boardFailure(args[0], result, data);
 }
 
 // The authenticated profile, not a second text parser, owns mention routing.
