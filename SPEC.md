@@ -1,6 +1,6 @@
 # hboard — Product & Architecture Specification
 
-- Status: P0 normal path observed; P1 live round trip and 9 native tests passed at `8f08b77`; final exact-actor and endpoint change awaits targeted live acceptance. App Mod remains open.
+- Status: P0, P1, and P2 are on main `c5ad855`. The final composer mention of `hboard-a-p1` entered session `01a20efa-015b-73ca-8368-587e2c0da868`, and reply `msg_4457b86e-cc9e-467c-9688-e2541fcb3eb6_2` is visible in that thread. Issue 1 is closed on that evidence.
 - Scope: Herdr App + Vercel Board + OMP, with one Herdr Core document for bindings
 - P0: real human → agent A → agent B round trip, plus terminal focus through the binding. See [evidence](docs/p0-evidence.md).
 
@@ -160,7 +160,11 @@ These are pinned facts, not probes to repeat:
 
 The operator reported a successful real human → A → B round trip using two existing OMP sessions. Both sessions persisted one HBoard custom mention record, and the official Herdr App focus command selected A's bound terminal. The App Mod was not implemented; clicking an actor in that Mod is a P2 acceptance requirement, not a completed P0 result.
 
-See [P0 evidence and prototype limitations](docs/p0-evidence.md). Preserve the prototype as the observed baseline; do not merge standalone P0 spike PR #2. The [P1 real-host evidence at `8f08b77`](https://github.com/Doeye1997/HBoard/pull/3#issuecomment-7124045668) establishes the normal path and 9 native tests. The final delta replaces text matching with the native current-actor filter and makes the scoped endpoint explicit in outbound guidance. Only those changed integration boundaries require targeted live acceptance. The acceptance table below specifies the intended production contract; it is not a claim that every scenario was exercised.
+See [P0 evidence and prototype limitations](docs/p0-evidence.md). Preserve the prototype as the observed baseline; do not merge standalone P0 spike PR #2. The [P1 real-host evidence at `8f08b77`](https://github.com/Doeye1997/HBoard/pull/3#issuecomment-7124045668) establishes the normal path and 9 native tests. The final delta replaces text matching with the native current-actor filter and makes the scoped endpoint explicit in outbound guidance. The targeted live check of that path is recorded in section 12.1. The acceptance table below specifies the intended production contract; it is not a claim that every scenario was exercised.
+
+## 12.1 Final acceptance
+
+On main `c5ad855`, a person posted from the installed HBoard composer on `# hboard-p1`. The post is `msg_4457b86e-cc9e-467c-9688-e2541fcb3eb6_1` and it mentions `@dddoeye1997-5720/hboard-a-p1`. Session `01a20efa-015b-73ca-8368-587e2c0da868` on terminal `t12x` persisted one `sh.doe.hboard.mention` record. The profile replied `msg_4457b86e-cc9e-467c-9688-e2541fcb3eb6_2`. The thread view shows that reply, and the body is only the original message id. The previous `hboard-a-p1` consumer was stopped and its binding cleared before this session started. That old session had no unconfirmed mention, so nothing was resent. The acceptance table remains the contract. This check did not re-run every row.
 
 ## 13. Acceptance
 
