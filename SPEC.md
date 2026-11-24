@@ -1,6 +1,6 @@
 # hboard — Product & Architecture Specification
 
-- Status: P0 normal-path integration reported successful; P1 production hardening and App Mod remain open
+- Status: P0 normal path observed; P1 native intake candidate implemented, pending real-host acceptance; App Mod remains open
 - Scope: Herdr App + Vercel Board + OMP, with one Herdr Core document for bindings
 - P0: real human → agent A → agent B round trip, plus terminal focus through the binding. See [evidence](docs/p0-evidence.md).
 
@@ -18,7 +18,7 @@ Herdr remains the execution environment. Board remains the message store. GitHub
 - Bind a Board profile to one OMP session and its terminal.
 - Deliver an explicit mention into that session without interrupting the current turn or an approval.
 - Let the agent reply, and mention another actor, with the official Board CLI.
-- Treat the persisted OMP custom record as the only consumption checkpoint.
+- Treat the persisted OMP Session branch as the only consumption checkpoint, including the initial cursor.
 - Show human mentions and the bound terminal. Do not show agent logs as chat.
 
 ### Non-goals
@@ -68,60 +68,52 @@ The App Mod and the extension share the binding document and nothing else. Neith
 - **Profile**: the Board handle this agent waits on and replies as. A profile is a name on the person's credential. It is not a security boundary.
 - **Session**: the OMP session id. It is not a terminal address. `hc keep` can reuse an address for a new process.
 - **Mention**: a Board mention of that profile. A message with no mention does not wake the agent.
-- **Checkpoint**: the custom record in the session's persisted branch. It stores the Board message id, thread id, and the cursor used to wait. There is no second cursor file.
+- **Checkpoint**: the latest scoped HBoard record on the persisted OMP session branch. A non-model-visible initial record anchors the first cursor; each native mention custom message carries the Board message ID, thread ID, event cursor and scope. There is no second cursor file.
 - **Entered**: the custom record is on the persisted session branch. The agent has not necessarily finished the work.
 
 ## 5. Binding
 
-One Core document per profile:
+One Core document per configured profile. It contains only the binding and the exclusive consumer claim: profile, session ID, terminal, generation, process instance ID, claim state, and scope (canonical Board URL, actor ID, profile, channel and session ID).
 
-```json
-{ "profile": "@agent-a", "sessionId": "…", "terminal": "t…", "generation": 1 }
-```
+The extension resolves the authenticated Board actor with the official CLI, verifies the complete mention handle, and pins the Board endpoint. It claims the document with the version it just read. An absent value or a stopped binding for the identical scope may be claimed; an active claim is never reused, even if the session ID matches. An incompatible or legacy P0 binding requires deliberate operator recovery. CAS settles the claim race; it is not a fence around a live consumer.
 
-The extension claims it with `doc.set` and the version it just read. If the version conflicts, this process stops waiting. The winner is the only waiter.
-
-A generation check does not stop a process that has already decided to call `sendMessage`. v1 therefore does not migrate a binding while the old consumer might still be running. Move the binding only after that process is confirmed stopped. If that cannot be confirmed, refuse the takeover. The compare-and-swap settles the claim race. It is not a fence around a live consumer.
-
-A replaced session does not inherit the old session's unpersisted messages. The new extension starts from Board at its own checkpoint, or from "now" when it has none. It does not replay another session's queue.
+Before each native submission the extension checks its instance and binding generation. Only the owning instance may release its claim. Graceful stop cancels and joins the wait; if no native submission is unconfirmed, mark the binding stopped. If submission is unconfirmed or process exit is abnormal, retain the claim. Do not automatically take over. An operator must confirm the old process stopped, reconcile any uncertain work, then clear the binding by versioned Core document update. A replacement session gets a new initial checkpoint, not the old session's queue.
 
 ## 6. Intake
 
-The extension, and only the extension, runs:
+Use the official CLI with the exact configured profile handle and the scoped checkpoint:
 
 ```text
 vercel board wait <channel> --mentions @<person>/<profile> --after <cursor> --json
 ```
 
-The handle needs the `@` and the person's prefix. On CLI 66.6.0, `--mentions hboard-a` and the actor id did not match a live mention; `--mentions @dddoeye1997-5720/hboard-a` did. Board stores that mention in the text as `@[actor-id]`. `--after` accepts a Board message id or an event cursor. The cursor for the next wait is the cursor on the last custom record in the live session branch. A new session with no record starts at the current head, so older mentions are not submitted.
+CLI 66.6.0 requires the complete mention handle. Board's canonical text represents an explicit mention as `@[actor-id]`. Only a new `message.posted` event containing that actor mention and authored by a different actor may start a turn. Edits, reactions, own posts and other events are ignored. Their cursors may advance in memory but never stand in for a durable receipt; replaying them is harmless. A timeout does not change the cursor.
 
-For each returned mention:
+On the first start of a session, read the channel's current Board cursor, append a non-model-visible scoped `sh.doe.hboard.start` entry through the OMP extension API, and confirm it is in the session file before the first wait. Intake begins at that baseline, not before it. On resume, use the last HBoard record on the current persisted branch. Never silently start from now again. A legacy spike session without a scoped baseline, an incompatible scope, or a rewind discarding HBoard records stops intake rather than replaying another context.
 
-1. If the live session branch already has a custom record for that Board message id, do not call `sendMessage`. The record is the checkpoint. Continue the wait after it.
-2. Otherwise call `pi.sendMessage` once, with `deliverAs: "followUp"`, `triggerTurn: true`, `attribution: "agent"`, and a HBoard `customType`. `details` carries the Board message id, thread id, the cursor, and the sender. The text is untrusted user content, not a system instruction.
-3. Do not call `sendMessage` again for that message id until this attempt is known. The follow-up queue is an in-memory array. The call's Promise is not a durable receipt.
-4. Advance the wait only when that custom record is on the persisted session branch. If the process dies before that, the queue is gone and the next wait returns the same mention.
+For each addressed post, submit exactly one native custom message with `deliverAs: "followUp"`, `triggerTurn: true`, `attribution: "agent"` and structured provenance. Wait without a delivery deadline until the intended custom record is on the live session branch, call OMP's public `ensureOnDisk()`, and confirm the exact entry in the actual local JSONL. Then and only then move to its event cursor. The enqueue API is not a receipt. There is never a second Board wait or native submission while the first is unconfirmed.
 
-`followUp` queues behind the current run. The default `steer` is not used, because it changes a running turn. An approval stays inside the run: streaming stays set until the run ends, and a queued follow-up is not inserted between a tool call and its result. HBoard does not detect approvals itself and does not add a scheduler.
+An active turn or approval retains OMP's native follow-up behavior. No scheduler, steering, terminal input or separate queue. Shutdown stops the watcher. Before intentional session/branch/tree changes, stop and join the intake loop; refuse the change if a native submission is still unconfirmed. Clear stops intake without claiming to undo the native queue. Do not resume intake implicitly in a different context.
 
-Entered means the record is in the session. It does not mean the model finished, replied, or succeeded.
+A crash or persistence failure with no receipt does not prove work had no side effect. Automatic takeover is forbidden. Resume from persisted evidence only after operator reconciliation where needed. This is not exactly-once execution.
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Watching
-  Watching --> Holding: wait returns a mention
-  Holding --> Watching: this session already has that message id
-  Holding --> Queued: one followUp submitted
-  Queued --> Watching: process exited before the record was persisted
-  Queued --> Entered: custom record is on the persisted branch
-  Entered --> Watching: next wait starts after that message id
+  [*] --> Watching: durable session checkpoint
+  Watching --> Watching: timeout / non-delivery event
+  Watching --> Held: addressed new post
+  Held --> Queued: one native followUp
+  Queued --> Entered: matching record confirmed on disk
+  Entered --> Watching: continue after receipt cursor
+  Queued --> Stopped: shutdown or ambiguous persistence
+  Watching --> Stopped: stop / ownership loss / context change
 ```
 
-This diagram is only the extension's gap between Board and the session file. Board's log and OMP's run are not these states.
+Entered means the message reached the persisted session branch, not that the agent completed work or replied.
 
 ## 7. Replies
 
-The injected message names the thread, the message id, and the profile. The agent replies with the official Board skill and CLI, including `--as <profile>` when the post must use that profile. On CLI 66.6.0, `vercel board reply` takes a message id. The thread id is not a message id and the command fails. Replying to the message id lands in that message's thread. HBoard does not add `board_post`, `board_reply`, or an outbox. Idempotency, when the agent needs it, is the CLI's `--idempotency-key`, not a HBoard operation log.
+The injected external message names the Board, thread, message ID, sender actor and profile. It does not force an agent to execute a test-specific shell command. The agent replies with the official Board skill and CLI, including `--as <profile>` when the post must use that profile. On CLI 66.6.0, `vercel board reply` takes a message id. The thread id is not a message id and the command fails. Replying to the message id lands in that message's thread. HBoard does not add `board_post`, `board_reply`, or an outbox. Idempotency, when the agent needs it, is the CLI's `--idempotency-key`, not a HBoard operation log.
 
 A reply that mentions another profile wakes that profile's extension and no other. The sender's own messages are not mentions of itself. A reply with no mention wakes nobody.
 
@@ -180,9 +172,9 @@ See [P0 evidence and prototype limitations](docs/p0-evidence.md). Preserve the p
 | The same mention is observed again | No second `sendMessage` once the record is persisted |
 | Mention while a turn is running | `followUp`. The running turn is not steered |
 | Mention while an approval is open | The approval stays inside the run. The mention is not typed into it |
-| Process exits after `sendMessage`, before the record is persisted | The next wait can see the mention again. It is submitted once |
+| Process exits after `sendMessage`, before the record is persisted | The claim remains held; reconcile uncertain work and confirm old process termination before authorized recovery from the durable checkpoint |
 | Session is replaced | The new session does not run the old session's unpersisted queue |
-| Second process claims the same profile | The loser stops. Takeover is refused until the winner is confirmed stopped |
+| Second process claims the same profile, even the same session | The loser stops. Takeover is refused until the prior claim is safely released or reconciled |
 | Herdr window closes | The OMP process still waits and can reply |
 | Record is persisted | The UI may say the message entered the session. It may not say the work finished |
 
