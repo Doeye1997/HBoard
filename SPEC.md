@@ -1,8 +1,8 @@
 # hboard — Product & Architecture Specification
 
-- Status: Draft, architecture converged, one real integration still open
+- Status: P0 normal-path integration reported successful; P1 production hardening and App Mod remain open
 - Scope: Herdr App + Vercel Board + OMP, with one Herdr Core document for bindings
-- Initial milestone: one real human → agent A → agent B round trip, and a Herdr actor that opens the real terminal
+- P0: real human → agent A → agent B round trip, plus terminal focus through the binding. See [evidence](docs/p0-evidence.md).
 
 ## 1. Purpose
 
@@ -164,17 +164,11 @@ These are pinned facts, not probes to repeat:
 | herdr CLI on this machine `0.9.0` (`b99002ac99b09e00b4ca692436cb15a6b0d676f1`) | Not the intake path. Upstream main was `0.9.5` at the time of the note |
 | Vercel CLI `66.6.0`, Board docs `8dd1fc496be46890ce171f28011f44dc7549fb99` | `wait --mentions` is a deployed route, not a local daemon. `--after` takes a message id or an event cursor. `reply --as` is the official write |
 
-## 12. The one remaining proof
+## 12. P0 result
 
-One real path, in this worktree, on a test channel, with two test profiles and two OMP sessions:
+The operator reported a successful real human → A → B round trip using two existing OMP sessions. Both sessions persisted one HBoard custom mention record, and the official Herdr App focus command selected A's bound terminal. The App Mod was not implemented; clicking an actor in that Mod is a P2 acceptance requirement, not a completed P0 result.
 
-1. A person mentions profile A.
-2. A's running session receives one `followUp`. The custom record is the checkpoint.
-3. A replies in the same thread and mentions profile B, using the official CLI.
-4. B's extension receives that mention and replies.
-5. Choosing the actor in Herdr opens that session's real terminal.
-
-No product UI, no second matrix, and no repeat of the Board or OMP proofs above. The run is not done until those five steps have been observed.
+See [P0 evidence and prototype limitations](docs/p0-evidence.md). Preserve the prototype as the observed baseline. The acceptance table below specifies the intended production contract; it is not a claim that every scenario passed P0.
 
 ## 13. Acceptance
 
