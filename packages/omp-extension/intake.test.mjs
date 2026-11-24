@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MENTION, START, checkpoint, addressed, mayClaim, consume } from "./intake.js";
+import { MENTION, START, checkpoint, addressed, mayClaim, consume, canonicalBoard } from "./intake.js";
 
 const scope = { board: "https://example.test/", actor: "a", profile: "p", channel: "test", sessionId: "s" };
 const anchor = { id: "base", type: "custom", customType: START, data: { scope, cursor: "head" } };
@@ -35,8 +35,19 @@ test("only new explicitly addressed posts from other actors are eligible", () =>
   assert.equal(addressed(posted("m", "c", "a").event, "a").message, null);
   assert.equal(addressed(posted("m", "c", "b", "@[other] hi").event, "a").message, null);
   assert.equal(addressed({ ...posted("m", "c").event, type: "message.edited" }, "a").message, null);
+  assert.equal(addressed(posted("m", "c", "b", "wake @person/p").event, "a").message, null);
+  assert.equal(addressed(posted("m", "c", "b", "wake @person/p").event, "a", "@person/p").message.id, "m");
+  assert.equal(addressed(posted("m", "c", "a", "wake @person/p").event, "a", "@person/p").message, null);
   assert.equal(addressed({ type: "reaction.added", cursor: "r" }, "a").message, null);
   assert.throws(() => addressed({ type: "message.posted", cursor: "c" }, "a"), /message ID/);
+});
+
+test("board endpoint may carry teamId and nothing else", () => {
+  const href = canonicalBoard("https://board.example/v1/messageboard/boards/brd_1?teamId=team_1");
+  assert.equal(new URL(href).searchParams.get("teamId"), "team_1");
+  assert.throws(() => canonicalBoard("https://user:secret@board.example/v1?teamId=team_1"), /canonical/);
+  assert.throws(() => canonicalBoard("https://board.example/v1?teamId=team_1&token=secret"), /canonical/);
+  assert.throws(() => canonicalBoard("http://board.example/v1?teamId=team_1"), /canonical/);
 });
 
 test("binding cannot be reclaimed by another live process, even in the same session", () => {

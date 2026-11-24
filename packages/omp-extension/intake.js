@@ -58,7 +58,7 @@ export function checkpoint(entries, branch, scope) {
 
 // Board wait filters can match edits/reactions as well as posts. Only a new,
 // explicitly addressed post from another actor can trigger a turn.
-export function addressed(event, actor) {
+export function addressed(event, actor, mention) {
   const cursor = string(event?.cursor, "event cursor");
   const type = string(event?.type, "event type");
   if (type !== "message.posted") return { cursor, message: null };
@@ -66,10 +66,25 @@ export function addressed(event, actor) {
   string(message?.id, "message ID");
   const sender = string(message?.by?.actor, "sender actor");
   if (typeof message.text !== "string") throw new Error("Missing message text");
-  if (sender === actor || !message.text.includes("@[" + actor + "]")) {
+  const stored = message.text.includes("@[" + actor + "]");
+  const named = typeof mention === "string" && mention.length > 0 && message.text.includes(mention);
+  if (sender === actor || (!stored && !named)) {
     return { cursor, message: null };
   }
   return { cursor, message };
+}
+
+// whoami returns the board endpoint with a teamId query. Credentials, fragments
+// and any other query are not part of that endpoint.
+export function canonicalBoard(value) {
+  const url = new URL(string(value, "Board URL"));
+  const keys = [...url.searchParams.keys()];
+  if (url.protocol !== "https:" || url.username || url.password || url.hash ||
+      keys.some(key => key !== "teamId") || new Set(keys).size !== keys.length ||
+      (keys.length && !url.searchParams.get("teamId"))) {
+    throw new Error("Expected canonical Board URL");
+  }
+  return url.href;
 }
 
 function getCheckpoint(ctx, scope) {
@@ -233,7 +248,7 @@ async function receipt(ctx, scope, id, signal) {
   }
 }
 
-export async function consume({ signal, actor, initial, readCheckpoint, assertOwned, wait, submit, confirm, setInflight }) {
+export async function consume({ signal, actor, mention, initial, readCheckpoint, assertOwned, wait, submit, confirm, setInflight }) {
   let cp = initial;
   let cursor = cp.cursor;
   for (;;) {
@@ -244,7 +259,7 @@ export async function consume({ signal, actor, initial, readCheckpoint, assertOw
     const response = await wait(cursor);
     signal.throwIfAborted();
     if (!response) continue;
-    const next = addressed(response.event, actor);
+    const next = addressed(response.event, actor, mention);
     if (!next.message || cp.seen.has(next.message.id)) {
       // Non-delivery events can be replayed after restart. Their cursor is
       // volatile, not a substitute for a durable Session receipt.
@@ -273,10 +288,9 @@ export default function intake(pi) {
     if (!/^[A-Za-z0-9_-]+$/.test(profile)) throw new Error("Invalid Board profile");
     const selected = process.env.HBOARD_BOARD_URL?.trim();
     const me = await board(pi, ctx, ["whoami"], profile, selected, signal);
-    const url = new URL(string(me.board, "Board URL"));
-    if (url.username || url.password || url.search || url.hash) throw new Error("Expected canonical Board URL");
+    const url = canonicalBoard(me.board);
     const scope = {
-      board: url.href,
+      board: url,
       actor: string(me.actor, "Board actor"),
       profile,
       channel,
@@ -292,6 +306,7 @@ export default function intake(pi) {
     await consume({
       signal,
       actor: scope.actor,
+      mention,
       initial,
       readCheckpoint: () => getCheckpoint(ctx, scope),
       assertOwned: () => checkBinding(active.own, signal),
