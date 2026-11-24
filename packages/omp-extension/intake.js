@@ -32,7 +32,8 @@ export function checkpoint(entries, branch, scope) {
     (entry.type === "custom_message" && entry.customType === MENTION);
   const all = entries.filter(relevant);
   const active = branch.filter(relevant);
-  if (all.some(e => !active.some(a => a.id === e.id))) {
+  const activeIds = new Set(active.map(entry => entry.id));
+  if (all.some(e => !activeIds.has(e.id))) {
     throw new Error("HBoard history is not on the active branch; intake stopped");
   }
   if (!active.length) return null;
@@ -232,6 +233,35 @@ async function receipt(ctx, scope, id, signal) {
   }
 }
 
+export async function consume({ signal, actor, initial, readCheckpoint, assertOwned, wait, submit, confirm, setInflight }) {
+  let cp = initial;
+  let cursor = cp.cursor;
+  for (;;) {
+    signal.throwIfAborted();
+    await assertOwned();
+    signal.throwIfAborted();
+    if (readCheckpoint()?.entry.id !== cp.entry.id) throw new Error("HBoard checkpoint changed");
+    const response = await wait(cursor);
+    signal.throwIfAborted();
+    if (!response) continue;
+    const next = addressed(response.event, actor);
+    if (!next.message || cp.seen.has(next.message.id)) {
+      // Non-delivery events can be replayed after restart. Their cursor is
+      // volatile, not a substitute for a durable Session receipt.
+      cursor = next.cursor;
+      continue;
+    }
+    await assertOwned();
+    signal.throwIfAborted();
+    if (readCheckpoint()?.entry.id !== cp.entry.id) throw new Error("HBoard checkpoint changed");
+    setInflight(true);
+    submit(next.message, next.cursor);
+    cp = await confirm(next.message.id);
+    cursor = cp.cursor;
+    setInflight(false);
+  }
+}
+
 export default function intake(pi) {
   let active;
   async function start(ctx) {
@@ -258,30 +288,17 @@ export default function intake(pi) {
     const pinned = await board(pi, ctx, ["whoami"], profile, scope.board, signal);
     if (pinned.actor !== scope.actor || pinned.profile !== profile) throw new Error("Board identity mismatch");
     active.own = await claim(profile, scope, terminal, randomUUID(), signal);
-    let cp = await initialize(pi, ctx, scope, signal);
-    let cursor = cp.cursor;
-    for (;;) {
-      signal.throwIfAborted();
-      await checkBinding(active.own, signal);
-      const current = getCheckpoint(ctx, scope);
-      if (current?.entry.id !== cp.entry.id) throw new Error("HBoard checkpoint changed");
-      const response = await board(pi, ctx,
+    const initial = await initialize(pi, ctx, scope, signal);
+    await consume({
+      signal,
+      actor: scope.actor,
+      initial,
+      readCheckpoint: () => getCheckpoint(ctx, scope),
+      assertOwned: () => checkBinding(active.own, signal),
+      wait: cursor => board(pi, ctx,
         ["wait", channel, "--mentions", mention, "--after", cursor, "--timeout", "10m"],
-        profile, scope.board, signal);
-      if (!response) continue;
-      const next = addressed(response.event, scope.actor);
-      if (!next.message || cp.seen.has(next.message.id)) {
-        // These events require no delivery. This volatile optimization is safe
-        // to replay after restart; the durable cursor remains in the session.
-        cursor = next.cursor;
-        continue;
-      }
-      const message = next.message;
-      await checkBinding(active.own, signal);
-      signal.throwIfAborted();
-      if (getCheckpoint(ctx, scope)?.entry.id !== cp.entry.id) throw new Error("HBoard checkpoint changed");
-      active.inflight = true;
-      pi.sendMessage({
+        profile, scope.board, signal),
+      submit: (message, cursor) => pi.sendMessage({
         customType: MENTION,
         attribution: "agent",
         display: true,
@@ -297,14 +314,13 @@ export default function intake(pi) {
           message.text,
         ].join("\n"),
         details: {
-          scope, cursor: next.cursor, messageId: message.id,
+          scope, cursor, messageId: message.id,
           threadId: message.thread, sender: message.by.actor,
         },
-      }, { deliverAs: "followUp", triggerTurn: true });
-      cp = await receipt(ctx, scope, message.id, signal);
-      cursor = cp.cursor;
-      active.inflight = false;
-    }
+      }, { deliverAs: "followUp", triggerTurn: true }),
+      confirm: id => receipt(ctx, scope, id, signal),
+      setInflight: value => { active.inflight = value; },
+    });
   }
 
   async function stop(ctx) {
