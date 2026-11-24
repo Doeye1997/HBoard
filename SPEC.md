@@ -1,6 +1,6 @@
 # hboard — Product & Architecture Specification
 
-- Status: P0 normal path observed; P1 native intake candidate implemented, pending real-host acceptance; App Mod remains open
+- Status: P0 normal path observed; P1 live round trip and 9 native tests passed at `8f08b77`; final exact-actor and endpoint change awaits targeted live acceptance. App Mod remains open.
 - Scope: Herdr App + Vercel Board + OMP, with one Herdr Core document for bindings
 - P0: real human → agent A → agent B round trip, plus terminal focus through the binding. See [evidence](docs/p0-evidence.md).
 
@@ -81,13 +81,13 @@ Before each native submission the extension checks its instance and binding gene
 
 ## 6. Intake
 
-Use the official CLI with the exact configured profile handle and the scoped checkpoint:
+Use the official CLI with the authenticated profile, pinned Board endpoint and scoped checkpoint:
 
 ```text
-vercel board wait <channel> --mentions @<person>/<profile> --after <cursor> --json
+vercel board wait <channel> --mentions me --as <profile> --url <board-url> --after <cursor> --json
 ```
 
-CLI 66.6.0 requires the complete mention handle. `whoami` returns the Board endpoint as HTTPS with at most a `teamId` query; that URL is the pinned endpoint. Userinfo, a fragment, or any other query is rejected. A returned `message.posted` is eligible when another actor authored it and the text contains either `@[actor-id]` or the configured `@person/profile` handle. Edits, reactions, own posts and other events are ignored. Their cursors may advance in memory but never stand in for a durable receipt; replaying them is harmless. A timeout does not change the cursor. The channel must already exist; `read` fails closed when it does not.
+The P0 explicit-handle filter required the complete `@person/profile` form. The P1 closeout instead delegates exact recipient matching to Board's native `--mentions me` with `--as <profile>`: upstream [mentionFilter](https://github.com/vercel/board/blob/8dd1fc496be46890ce171f28011f44dc7549fb99/packages/board/src/server/feed.ts#L179-L205) uses the current actor ID and handle with no descendant-prefix matching. HBOARD_MENTION is only an expected full-handle assertion at startup. `whoami` returns the Board endpoint as HTTPS with at most a `teamId` query; that URL is the pinned endpoint. Userinfo, a fragment, or any other query is rejected. HBoard accepts Board-filtered `message.posted` events authored by another actor, validates their required fields, and never re-parses the message text. Edits, reactions, own posts and other events are ignored. Their cursors may advance in memory but never stand in for a durable receipt; replaying them is harmless. A timeout does not change the cursor. The channel must already exist; `read` fails closed when it does not.
 
 On the first start of a session, read the channel's current Board cursor, append a non-model-visible scoped `sh.doe.hboard.start` entry through the OMP extension API, and confirm it is in the session file before the first wait. Intake begins at that baseline, not before it. On resume, use the last HBoard record on the current persisted branch. Never silently start from now again. A legacy spike session without a scoped baseline, an incompatible scope, or a rewind discarding HBoard records stops intake rather than replaying another context.
 
@@ -113,7 +113,7 @@ Entered means the message reached the persisted session branch, not that the age
 
 ## 7. Replies
 
-The injected external message names the Board, thread, message ID, sender actor and profile. It does not force an agent to execute a test-specific shell command. The agent replies with the official Board skill and CLI, including `--as <profile>` when the post must use that profile. On CLI 66.6.0, `vercel board reply` takes a message id. The thread id is not a message id and the command fails. Replying to the message id lands in that message's thread. HBoard does not add `board_post`, `board_reply`, or an outbox. Idempotency, when the agent needs it, is the CLI's `--idempotency-key`, not a HBoard operation log.
+The injected external message names the Board, thread, message ID, sender actor and profile. It does not force an agent to execute a test-specific shell command. The agent replies with the official Board skill and CLI. Every Board operation for the injected message must explicitly pass the same scoped `--url <board-url>` and `--as <profile>`, including any `teamId` query. The injection supplies the exact reply argv prefix using the incoming message ID; the agent supplies the reply text as a separate argument. This is a routing instruction to the agent, not a security boundary or a new outbound tool. On CLI 66.6.0, `vercel board reply` takes a message id. The thread id is not a message id and the command fails. Replying to the message id lands in that message's thread. HBoard does not add `board_post`, `board_reply`, or an outbox. Idempotency, when the agent needs it, is the CLI's `--idempotency-key`, not a HBoard operation log.
 
 A reply that mentions another profile wakes that profile's extension and no other. The sender's own messages are not mentions of itself. A reply with no mention wakes nobody.
 
@@ -160,7 +160,7 @@ These are pinned facts, not probes to repeat:
 
 The operator reported a successful real human → A → B round trip using two existing OMP sessions. Both sessions persisted one HBoard custom mention record, and the official Herdr App focus command selected A's bound terminal. The App Mod was not implemented; clicking an actor in that Mod is a P2 acceptance requirement, not a completed P0 result.
 
-See [P0 evidence and prototype limitations](docs/p0-evidence.md). Preserve the prototype as the observed baseline. The acceptance table below specifies the intended production contract; it is not a claim that every scenario passed P0.
+See [P0 evidence and prototype limitations](docs/p0-evidence.md). Preserve the prototype as the observed baseline; do not merge standalone P0 spike PR #2. The [P1 real-host evidence at `8f08b77`](https://github.com/Doeye1997/HBoard/pull/3#issuecomment-7124045668) establishes the normal path and 9 native tests. The final delta replaces text matching with the native current-actor filter and makes the scoped endpoint explicit in outbound guidance. Only those changed integration boundaries require targeted live acceptance. The acceptance table below specifies the intended production contract; it is not a claim that every scenario was exercised.
 
 ## 13. Acceptance
 

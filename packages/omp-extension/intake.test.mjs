@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MENTION, START, checkpoint, addressed, mayClaim, consume, canonicalBoard } from "./intake.js";
+import { MENTION, START, checkpoint, addressed, mayClaim, consume, canonicalBoard, waitForMention, mentionPayload } from "./intake.js";
 
 const scope = { board: "https://example.test/", actor: "a", profile: "p", channel: "test", sessionId: "s" };
 const anchor = { id: "base", type: "custom", customType: START, data: { scope, cursor: "head" } };
@@ -30,16 +30,43 @@ test("rewind, scope change, and legacy unscoped receipt fail closed", () => {
   assert.throws(() => checkpoint([anchor, row, duplicate], [anchor, row, duplicate], scope), /Duplicate/);
 });
 
-test("only new explicitly addressed posts from other actors are eligible", () => {
+test("trust the Board-matched recipient; reject only non-post and self events", () => {
   assert.equal(addressed(posted("m", "c").event, "a").message.id, "m");
+  // Board resolves handle case and actor IDs. HBoard must not drop a post
+  // already selected by the native current-actor filter.
+  assert.equal(addressed(posted("m", "c", "b", "wake @PERSON/P").event, "a").message.id, "m");
   assert.equal(addressed(posted("m", "c", "a").event, "a").message, null);
-  assert.equal(addressed(posted("m", "c", "b", "@[other] hi").event, "a").message, null);
   assert.equal(addressed({ ...posted("m", "c").event, type: "message.edited" }, "a").message, null);
-  assert.equal(addressed(posted("m", "c", "b", "wake @person/p").event, "a").message, null);
-  assert.equal(addressed(posted("m", "c", "b", "wake @person/p").event, "a", "@person/p").message.id, "m");
-  assert.equal(addressed(posted("m", "c", "a", "wake @person/p").event, "a", "@person/p").message, null);
   assert.equal(addressed({ type: "reaction.added", cursor: "r" }, "a").message, null);
   assert.throws(() => addressed({ type: "message.posted", cursor: "c" }, "a"), /message ID/);
+});
+
+test("wait uses the upstream exact current-actor filter with the pinned endpoint and profile", async () => {
+  const pinned = { ...scope, board: "https://board.example/v1/boards/brd_1?teamId=team_1" };
+  const event = posted("m", "c", "b", "wake @PERSON/P");
+  const signal = new AbortController().signal;
+  const calls = [];
+  const pi = { exec: async (...args) => {
+    calls.push(args);
+    return { code: 0, stdout: JSON.stringify(event), stderr: "", killed: false };
+  } };
+  assert.deepEqual(await waitForMention(pi, { cwd: "/project" }, pinned, "head", signal), event);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], ["vercel", ["board", "wait", "test", "--mentions", "me",
+    "--after", "head", "--timeout", "10m", "--as", "p", "--url", pinned.board, "--json"],
+    { cwd: "/project", signal, timeout: 660000 }]);
+});
+
+test("reply guidance uses the same Board URL and profile and the incoming message ID", () => {
+  const pinned = { ...scope, board: "https://board.example/v1/boards/brd_1?teamId=team_1" };
+  const message = { ...posted("m", "c").event.message, thread: "thread-not-message-id" };
+  const payload = mentionPayload(pinned, message, "c");
+  const argvLine = payload.content.split("\n").find(line => line.includes("Reply argv prefix"));
+  assert.ok(argvLine);
+  assert.deepEqual(JSON.parse(argvLine.slice(argvLine.indexOf("["))), ["vercel", "board", "reply", "m",
+    "--as", "p", "--url", pinned.board, "--json"]);
+  assert.deepEqual(payload.details, { scope: pinned, cursor: "c", messageId: "m",
+    threadId: "thread-not-message-id", sender: "b" });
 });
 
 test("board endpoint may carry teamId and nothing else", () => {

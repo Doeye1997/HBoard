@@ -6,7 +6,7 @@ HBoard adds no message server, queue, scheduler or outbound Board tools. The ext
 
 - Use the P0-pinned Herdr Core, OMP and Vercel CLI versions in [SPEC](../../SPEC.md). Keep the official Board skill available to the agent.
 - Start OMP in a real Herdr terminal with `HC_TERMINAL_ID`. The Core API must be reachable through `hc.exe connect`.
-- Use a dedicated test channel and two fresh profiles for the P1 acceptance run. Do not silently attach a P0 session or replace its active binding. The earlier prototype is preserved at `39e3889`.
+- Use an existing dedicated test channel and two test profiles with confirmed stopped/cleared bindings for acceptance. Do not silently attach a P0 session or replace its active binding. The earlier prototype is preserved at `39e3889`.
 
 ## Start in each Herdr terminal
 
@@ -21,9 +21,9 @@ $env:HBOARD_CHANNEL = "hboard-p1"
 omp --extension (Join-Path (Get-Location) "packages/omp-extension/intake.js")
 ```
 
-Repeat for profile B in its own Herdr terminal. Set the complete mention handle, not the actor ID or bare profile. The extension checks Board identity via `whoami`, pins the discovered Board URL, obtains an exclusive Core binding, and persists a scoped initial cursor in the OMP session before waiting.
+Repeat for profile B in its own Herdr terminal. Set the complete expected mention handle for startup identity verification, not the actor ID or bare profile. The extension checks Board identity via `whoami`, pins the discovered Board URL, obtains an exclusive Core binding, and persists a scoped initial cursor in the OMP session before waiting with native `--mentions me --as <profile> --url <board-url>`. It does not interpret mention text locally.
 
-Use the normal Board CLI/skill to post a message mentioning A. Ask A to reply to the incoming message ID and explicitly mention B. B replies in the same conversation. Use the corresponding Core binding's terminal ID to focus the real terminal through the official Herdr App command. Do not mistake the focus command for an implemented App Mod.
+Use the normal Board CLI/skill to post a message mentioning A. Ask A to reply to the incoming message ID and explicitly mention B. For reads and replies use the explicit `--as` and `--url` from the injected reply argv; do not rely on the ambient Board default. B replies in the same conversation. Use the corresponding Core binding's terminal ID to focus the real terminal through the official Herdr App command. Do not mistake the focus command for an implemented App Mod.
 
 ## Session and ownership
 
@@ -44,6 +44,6 @@ HBoard stops before intentional session/branch changes when safe; an unconfirmed
 node --test packages/omp-extension/intake.test.mjs
 ```
 
-Eight focused checks exercise HBoard-owned checkpoint, actor filtering, claim eligibility and serial consumption behavior. The test bodies and exact source helpers were evaluated in an isolated JavaScript runtime with an assertion shim; all eight passed. The native Node test runner, Windows process handling, CLI endpoint/actor selection, actual Session file confirmation and P1 live A→B have not yet been exercised in the target host. Those remain required before accepting the production extension. No upstream capability matrix is needed.
+The [P1 live A→B and 9 native tests at `8f08b77`](https://github.com/Doeye1997/HBoard/pull/3#issuecomment-7124045668) remain evidence for the unchanged Session checkpoint and ownership path. The closeout candidate has 11 native Node tests, including the observed case-sensitive parser failure, exact wait argv and scoped reply guidance. Only the changed integration still needs a targeted live check in the target Herdr host: use two test actors with the new extension; send a case-varied mention addressed to A only, confirm the authenticated profile's native `me` filter reaches A and not B, then confirm A's official CLI reply uses the pinned URL, profile and message ID and appears in the same Board thread. No full repeat of P0/P1 or upstream capability matrix is needed.
 
 Keep raw transcripts, local paths, credentials and private Board data out of Git.
