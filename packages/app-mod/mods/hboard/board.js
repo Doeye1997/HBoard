@@ -26,6 +26,11 @@ export function argv(command, { board, flags = [], args = [] } = {}) {
     ...(args.length ? ["--", ...args] : [])];
 }
 
+// Use the same executable and argv prefix for every Board read and write.
+export function boardInvocation(transport, args) {
+  return { command: transport.command, args: [...transport.prefix, ...args] };
+}
+
 export function readArgs(route) {
   if (route.kind === "thread") return { args: [route.id] };
   if (route.kind === "inbox") return { flags: ["--mentions", "me", "--limit", "30"] };

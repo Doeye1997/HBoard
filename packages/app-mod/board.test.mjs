@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canonicalBoard, humanScope, sameHuman, argv, readArgs, createSend, sendArgs, parseReply, actorProfile, bindingTarget, signature, threadSummary, readMarker, isUnread, toggleFollow } from "./mods/hboard/board.js";
+import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, readArgs, createSend, sendArgs, parseReply, actorProfile, bindingTarget, signature, threadSummary, readMarker, isUnread, toggleFollow } from "./mods/hboard/board.js";
 const scope = { board: "https://board.example/v1/boards/b?teamId=t", actor: "person", handle: "me" };
 const actor = { id: "person+worker", handle: "me/worker" };
 const root = { id: "msg_1", channel: "dev", version: 1, text: "root" };
@@ -59,4 +59,16 @@ test("local attention markers use Board revisions, not message copies", () => {
   const following = toggleFollow(seen, root);
   assert.deepEqual(following.followed, [{ id: "msg_1", channel: "dev" }]);
   assert.deepEqual(toggleFollow(following, root).followed, []);
+});
+
+test("Windows CLI invocation preserves arbitrary composer text as one literal argument", () => {
+  const transport = { command: "node.exe", prefix: ["C:/Program Files/vercel/dist/index.js"] };
+  const text = '--flag & | ^ %PATH% !X! "quoted" \n第二行';
+  const intent = createSend(scope, { kind: "thread", id: "msg_1" }, text, "same-key");
+  const invocation = boardInvocation(transport, sendArgs(intent));
+  assert.equal(invocation.command, "node.exe");
+  assert.deepEqual(invocation.args, [transport.prefix[0], ...sendArgs(intent)]);
+  assert.equal(invocation.args.at(-1), text);
+  assert.deepEqual(boardInvocation(transport, argv("whoami", { board: scope.board })).args,
+    [transport.prefix[0], ...argv("whoami", { board: scope.board })]);
 });

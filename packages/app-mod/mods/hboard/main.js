@@ -1,7 +1,7 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
-import { exec, appHome, checking, props, run, theme, terminals } from "herdr";
-import { canonicalBoard, humanScope, sameHuman, argv, readArgs, createSend, sendArgs, parseReply, actorProfile, bindingTarget, messageName, threadSummary, readMarker, isUnread, toggleFollow } from "./board.js";
+import { exec, appHome, checking, props, run, theme, terminals, window } from "herdr";
+import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, readArgs, createSend, sendArgs, parseReply, actorProfile, bindingTarget, messageName, threadSummary, readMarker, isUnread, toggleFollow } from "./board.js";
 
 // Adopt the Herdr native theme and the spacing/typography scale of its panels.
 const UI = { rail: 216, pad: 12, gap: 8, row: 30, radius: 7, small: 11.5, text: 13, heading: 16, composer: 92 };
@@ -20,13 +20,24 @@ function button(id, text, t, action, enabled = true, primary = false) {
     .when(enabled, e => e.cursor_pointer().hover(s => s.opacity(0.85)).on_click(action)).child(text);
 }
 
-async function cli(command, board, options = {}) {
-  return parseReply(await exec("vercel", argv(command, { board, ...options }), { timeout: 30000 }), command);
+async function resolveBoardCli() {
+  if (window().platform !== "windows") return { command: "vercel", prefix: [] };
+  const manifest = props()?.vercelPackage;
+  const result = await exec("node.exe", [appHome() + "/mods/hboard/resolve-vercel.cjs",
+    ...(manifest ? [manifest] : [])], { timeout: 10000 });
+  if (result.code !== 0) throw Error("Cannot resolve the Windows Vercel CLI. Set the layout mod's vercelPackage to the official package.json path.");
+  const transport = JSON.parse(result.stdout);
+  if (transport?.command !== "node.exe" || !Array.isArray(transport.prefix) ||
+      transport.prefix.length !== 1 || typeof transport.prefix[0] !== "string" || !transport.prefix[0]) {
+    throw Error("Invalid Windows CLI resolution");
+  }
+  return transport;
 }
 
 export default class HBoard extends View {
   init(_props, cx) {
     this.scope = null;
+    this.transport = null;
     this.channels = [];
     this.actors = [];
     this.nextChannel = null;
@@ -44,10 +55,20 @@ export default class HBoard extends View {
     });
   }
 
+  async execBoard(args) {
+    if (!this.transport) throw Error("Board CLI is not connected");
+    const { command, args: actual } = boardInvocation(this.transport, args);
+    return exec(command, actual, { timeout: 30000 });
+  }
+
+  async cli(command, board, options = {}) {
+    return parseReply(await this.execBoard(argv(command, { board, ...options })), command);
+  }
+
   async directory(scope) {
     const [channels, actors] = await Promise.all([
-      cli("channels", scope.board, { flags: ["--limit", "100"], args: ["list"] }),
-      cli("actors", scope.board),
+      this.cli("channels", scope.board, { flags: ["--limit", "100"], args: ["list"] }),
+      this.cli("actors", scope.board),
     ]);
     return { channels: array(channels.channels, "channels"), next: channels.next ?? null, actors: array(actors.actors, "actors") };
   }
@@ -56,6 +77,7 @@ export default class HBoard extends View {
     if (checking() || this.connecting || this.pending || this.sending) return;
     const seq = ++this.seq;
     this.scope = null;
+    this.transport = null;
     this.data = null;
     this.connecting = true;
     this.loading = false;
@@ -68,8 +90,9 @@ export default class HBoard extends View {
     cx.notify();
     cx.spawn(async cx => {
       try {
-        const scope = humanScope(await cli("whoami", entered ? canonicalBoard(entered) : undefined));
-        const pinned = humanScope(await cli("whoami", scope.board));
+        this.transport = await resolveBoardCli();
+        const scope = humanScope(await this.cli("whoami", entered ? canonicalBoard(entered) : undefined));
+        const pinned = humanScope(await this.cli("whoami", scope.board));
         if (!sameHuman(scope, pinned)) throw Error("Board identity changed while connecting");
         const directory = await this.directory(scope);
         if (seq !== this.seq) return;
@@ -120,7 +143,7 @@ export default class HBoard extends View {
     cx.notify();
     cx.spawn(async cx => {
       try {
-        const data = await cli("read", scope.board, readArgs(route));
+        const data = await this.cli("read", scope.board, readArgs(route));
         if (seq !== this.seq || !sameHuman(scope, this.scope)) return;
         if (route.kind === "thread") {
           if (data.message?.id !== route.id) throw Error("Board returned a different thread root");
@@ -142,7 +165,7 @@ export default class HBoard extends View {
     this.loadingChannels = true; cx.notify();
     cx.spawn(async cx => {
       try {
-        const pinned = humanScope(await cli("whoami", scope.board));
+        const pinned = humanScope(await this.cli("whoami", scope.board));
         if (!sameHuman(scope, pinned)) throw Error("Board identity changed; reopen the layout to reconnect");
         const directory = await this.directory(scope);
         if (!sameHuman(scope, this.scope)) return;
@@ -161,7 +184,7 @@ export default class HBoard extends View {
     this.loadingChannels = true; cx.notify();
     cx.spawn(async cx => {
       try {
-        const page = await cli("channels", scope.board, { flags: ["--limit", "100", "--after", next], args: ["list"] });
+        const page = await this.cli("channels", scope.board, { flags: ["--limit", "100", "--after", next], args: ["list"] });
         if (!sameHuman(scope, this.scope) || this.nextChannel !== next) return;
         this.channels = [...new Map([...this.channels, ...array(page.channels, "channels")].map(c => [c.path, c])).values()];
         this.nextChannel = page.next ?? null;
@@ -188,11 +211,12 @@ export default class HBoard extends View {
     this.actionError = ""; this.focusing = actor.id; cx.notify();
     cx.spawn(async cx => {
       try {
-        const result = await exec("node", [appHome() + "/mods/hboard/read-binding.cjs", profile], { timeout: 20000 });
+        const result = await exec(window().platform === "windows" ? "node.exe" : "node",
+          [appHome() + "/mods/hboard/read-binding.cjs", profile], { timeout: 20000 });
         if (seq !== this.focusSeq || !sameHuman(scope, this.scope)) return;
         const doc = parseReply(result, "binding read");
         const target = bindingTarget(doc, actor, scope, terminals());
-        if (!target) throw Error("No matching active binding and live agent terminal for @" + actor.handle);
+        if (!target) { this.bound = null; throw Error("No matching active binding and live agent terminal for @" + actor.handle); }
         run("agent.focus", { terminal: target.address });
         this.bound = { ...target, actor: actor.id };
       } catch (error) {
@@ -215,10 +239,10 @@ export default class HBoard extends View {
     cx.spawn(async cx => {
       let invoked = false;
       try {
-        const human = humanScope(await cli("whoami", intent.scope.board));
+        const human = humanScope(await this.cli("whoami", intent.scope.board));
         if (!sameHuman(human, intent.scope) || !sameHuman(this.scope, intent.scope)) throw Error("Board identity changed; send refused");
         invoked = true;
-        const result = parseReply(await exec("vercel", sendArgs(intent), { timeout: 30000 }), intent.command);
+        const result = parseReply(await this.execBoard(sendArgs(intent)), intent.command);
         const m = result.message;
         if (result.outcome !== "posted" || typeof m?.id !== "string" || m.by?.actor !== intent.scope.actor ||
             (intent.command === "post" ? m.channel !== intent.target : m.re !== intent.target && m.replyTo !== intent.target)) {
@@ -268,7 +292,7 @@ export default class HBoard extends View {
           .children(this.actors.map(actor => h_flex().id("member-" + actor.id).items_center().gap(4).h(UI.row).flex_none()
             .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(actor.handle ?? actor.id))
             .child(button("mention-" + actor.id, "@", t, (_e, cx) => this.mention(actor, cx), this.canCompose() && enabled))
-            .when(!!actorProfile(actor), e => e.child(button("open-" + actor.id, this.focusing === actor.id ? "…" : "Open", t, (_e, cx) => this.openActor(actor, cx), !this.focusing))))));
+            .when(!!actorProfile(actor), e => e.child(button("open-" + actor.id, this.focusing === actor.id ? "…" : "Open", t, (_e, cx) => this.openActor(actor, cx), !this.focusing)))))));
   }
 
   message(m, t, compact = false) {
