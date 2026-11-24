@@ -277,7 +277,7 @@ export default class HBoard extends View {
     const enabled = !this.pending && !this.sending && !this.connecting;
     const channel = this.route.channel;
     const unread = this.route.kind === "inbox" && this.data?.threads ? this.data.threads.filter(s => isUnread(this.prefs, s)).length : null;
-    return v_flex().w(UI.rail).flex_none().min_h(0).bg(t.chrome).p(UI.pad).gap(UI.gap)
+    return v_flex().w(UI.rail).h_full().flex_none().min_h(0).bg(t.chrome).p(UI.pad).gap(UI.gap)
       .child(div().font_semibold().text_size(UI.heading).child("HBoard"))
       .child(label(this.scope ? "@" + this.scope.handle : "Connect a Board", t))
       .when(!!this.scope, e => e
@@ -333,8 +333,9 @@ export default class HBoard extends View {
       .child(label(this.route.kind === "thread" ? "Reply to thread" : "New discussion", t))
       .when(!this.pending, e => e.child(Textarea.new(this.draft).h(UI.composer).px(UI.gap).rounded(UI.radius).border_1().border_color(t.input).bg(t.background).text_color(t.foreground)))
       .when(!!this.pending, e => e.child(div().text_color(t.muted).child(this.pending.text)))
+      .child(label("Mention to notify · profiles share their person's credential", t))
       .child(h_flex().gap(UI.gap).items_center()
-        .child(label("Mention to notify · profiles share their person's credential", t)).child(div().flex_1())
+        .child(div().flex_1())
         .when(!!this.pending && !this.sending, e => e.child(button("forget", "Forget unconfirmed send", t, (_e, cx) => { this.pending = null; this.actionError = "Unconfirmed send forgotten locally. Check Board before posting again."; cx.notify(); })))
         .child(button("send", this.sending ? "Sending…" : this.pending ? "Retry same send" : this.route.kind === "thread" ? "Reply" : "Post", t, (_e, cx) => this.send(cx), !this.sending && (!!this.pending || !!this.draft.value().trim()), true)));
   }
@@ -346,7 +347,7 @@ export default class HBoard extends View {
     const bound = this.bound && terminals().find(t => t.address === this.bound.address && t.state === "live" && t.program?.agent);
     return h_flex().id("hboard-root").size_full().min_h(0).min_w(0).bg(t.background).text_color(t.foreground).text_size(UI.text)
       .child(this.sidebar(t))
-      .child(v_flex().flex_1().min_w(0).min_h(0).p(UI.pad).gap(UI.gap)
+      .child(v_flex().flex_1().h_full().min_w(0).min_h(0).p(UI.pad).gap(UI.gap)
         .child(h_flex().items_center().gap(UI.gap).flex_none()
           .child(div().flex_1().min_w(0).truncate().font_semibold().text_size(UI.heading).child(connected ? title : "Connect Board"))
           .when(connected, e => e.child(button("refresh", this.loading ? "Reading…" : "Refresh", t, (_e, cx) => this.refresh(cx), !this.loading && !this.sending && route.kind !== "following")))
@@ -369,7 +370,7 @@ export default class HBoard extends View {
           .child(v_flex().id("hboard-content").flex_1().min_h(0).overflow_y_scrollbar().child(this.content(t)))
           .when(!!this.readError, e => e.child(div().text_color(t.blocked ?? t.foreground).child("Read failed" + (this.data ? " (last loaded data)" : "") + ": " + this.readError)))
           .when(!!this.sent, e => e.child(label(this.sent, t)))
-          .child(this.composer(t)))
+          .when(this.canCompose() || !!this.pending, e => e.child(this.composer(t))))
         .when(!!this.actionError, e => e.child(div().text_color(t.blocked ?? t.foreground).child(this.actionError))));
   }
 }
