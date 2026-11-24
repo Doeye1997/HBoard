@@ -1,0 +1,62 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { canonicalBoard, humanScope, sameHuman, argv, readArgs, createSend, sendArgs, parseReply, actorProfile, bindingTarget, signature, threadSummary, readMarker, isUnread, toggleFollow } from "./mods/hboard/board.js";
+const scope = { board: "https://board.example/v1/boards/b?teamId=t", actor: "person", handle: "me" };
+const actor = { id: "person+worker", handle: "me/worker" };
+const root = { id: "msg_1", channel: "dev", version: 1, text: "root" };
+const reply = { id: "msg_2", version: 2, text: "reply" };
+const prefs = { seen: {}, followed: [] };
+
+test("connect uses the authenticated human and canonical endpoint", () => {
+  assert.deepEqual(humanScope({ ...scope, kind: "person", profile: null }), scope);
+  assert.throws(() => humanScope({ ...scope, kind: "person", profile: "worker" }), /human/);
+  assert.throws(() => canonicalBoard("https://u:p@board.example/"), /canonical/);
+  assert.throws(() => canonicalBoard("https://board.example/?token=secret"), /canonical/);
+  assert.equal(sameHuman(scope, { ...scope, actor: "other" }), false);
+});
+
+test("native reads preserve Board scope, exact human Inbox and message ID", () => {
+  assert.deepEqual(argv("read", { board: scope.board, ...readArgs({ kind: "inbox" }) }),
+    ["board", "read", "--url", scope.board, "--json", "--mentions", "me", "--limit", "30"]);
+  assert.deepEqual(readArgs({ kind: "thread", id: "msg_1", thread: "not-message-id" }), { args: ["msg_1"] });
+  assert.deepEqual(readArgs({ kind: "channel", channel: "dev", before: "older" }),
+    { flags: ["--limit", "30", "--before", "older"], args: ["dev"] });
+});
+
+test("send freezes destination and idempotency; leading flags are text", () => {
+  const draft = createSend(scope, { kind: "thread", id: "msg_1" }, "--url attacker\n@me/worker", "same-key");
+  const args = ["board", "reply", "--url", scope.board, "--json", "--idempotency-key", "same-key", "--", "msg_1", "--url attacker\n@me/worker"];
+  assert.deepEqual(sendArgs(draft), args);
+  assert.deepEqual(sendArgs(draft), args);
+  assert.throws(() => createSend(scope, { kind: "inbox" }, "hello", "k"), /Open a channel/);
+  assert.throws(() => createSend(scope, { kind: "channel", channel: "dev" }, "-", "k"), /reserved/);
+});
+
+test("only exact scoped active binding plus a live agent permits navigation", () => {
+  const value = { state: "active", profile: "worker", instanceId: "i", sessionId: "s", terminal: "t1", scope: { board: scope.board, actor: actor.id, profile: "worker", sessionId: "s" } };
+  const terminals = [{ address: "t1", state: "live", program: { agent: true }, status: "working" }];
+  assert.equal(actorProfile(actor), "worker");
+  assert.equal(bindingTarget({ value }, actor, scope, terminals).address, "t1");
+  assert.equal(bindingTarget({ value }, { ...actor, id: "other+worker" }, scope, terminals), null);
+  assert.equal(bindingTarget({ value }, actor, { ...scope, board: "https://other/" }, terminals), null);
+  assert.equal(bindingTarget({ value: { ...value, state: "stopped" } }, actor, scope, terminals), null);
+  assert.equal(bindingTarget({ value }, actor, scope, [{ ...terminals[0], program: { agent: false } }]), null);
+});
+
+test("only an actual successful structured result is accepted", () => {
+  assert.deepEqual(parseReply({ code: 0, stdout: '{"channels":[]}' }, "channels"), { channels: [] });
+  assert.throws(() => parseReply({ code: 1, stdout: '{"reason":"channel_not_found"}' }, "read"), /channel_not_found/);
+  assert.throws(() => parseReply({ code: 0, stdout: "unstructured" }, "read"), /failed/);
+});
+
+test("local attention markers use Board revisions, not message copies", () => {
+  const summary = threadSummary({ message: root, replies: [reply] });
+  assert.equal(isUnread(prefs, summary), true);
+  const seen = readMarker(prefs, summary);
+  assert.equal(isUnread(seen, summary), false);
+  assert.equal(isUnread(seen, { ...summary, last: { ...reply, version: 3 } }), true);
+  assert.equal(seen.seen.msg_1, signature(summary));
+  const following = toggleFollow(seen, root);
+  assert.deepEqual(following.followed, [{ id: "msg_1", channel: "dev" }]);
+  assert.deepEqual(toggleFollow(following, root).followed, []);
+});
