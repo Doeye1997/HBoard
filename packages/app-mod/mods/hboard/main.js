@@ -1,7 +1,7 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, ScrollHandle } from "gpui-base";
-import { exec, appHome, checking, props, run, theme, terminals, window, layout } from "herdr";
-import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, generalRoute, isGeneral, canComposeRoute, terminalPane, threadRoute, draftKey, workspacePanes, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, messageName, threadSummary, readMarker, isUnread, toggleFollow } from "./board.js";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, ScrollHandle, TextView } from "gpui-base";
+import { exec, appHome, checking, props, run, theme, terminals, window, layout, pickFolder } from "herdr";
+import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, generalRoute, isGeneral, canComposeRoute, terminalPane, threadRoute, draftKey, workspacePanes, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, messageName, threadSummary, readMarker, isUnread, toggleFollow, safeMarkdown, reactionsFor, attachmentRows, messageInThread, reactionArgs, downloadArgs, nativeTask, visibleLabels } from "./board.js";
 
 // Adopt the Herdr native theme and the spacing/typography scale of its panels.
 const UI = { rail: 208, detail: 416, pad: 16, gap: 8, row: 32, radius: 10, small: 12, text: 14, heading: 20, composer: 72, avatar: 32 };
@@ -65,14 +65,14 @@ export default class HBoard extends View {
     });
   }
 
-  async execBoard(args) {
+  async execBoard(args, options = {}) {
     if (!this.transport) throw Error("Board CLI is not connected");
     const { command, args: actual } = boardInvocation(this.transport, args);
-    return exec(command, actual, { timeout: 30000 });
+    return exec(command, actual, { timeout: 30000, ...options });
   }
 
-  async cli(command, board, options = {}) {
-    return parseReply(await this.execBoard(argv(command, { board, ...options })), command);
+  async cli(command, board, options = {}, execOptions = {}) {
+    return parseReply(await this.execBoard(argv(command, { board, ...options }), execOptions), command);
   }
 
   async directory(scope) {
@@ -400,6 +400,132 @@ export default class HBoard extends View {
     });
   }
 
+  detailMessage(id) {
+    return this.detail && !this.terminalVisible() && !this.detailReadError
+      ? messageInThread(this.detailData, id) : null;
+  }
+
+  // One explicit human action, official CLI, and an authoritative reread.
+  // No local reaction/task state or retry loop.
+  react(cx, id, name) {
+    if (checking() || this.pending || this.sending || !this.scope) return;
+    const message = this.detailMessage(id);
+    if (!message || message.deleted) return;
+    const row = reactionsFor(message, this.scope.actor, true).find(r => r.name === name);
+    if (!row) return;
+    const scope = this.scope, route = this.detail, remove = row.own;
+    const args = reactionArgs(scope, message, name, remove);
+    this.sending = true;
+    this.nativeAction = true;
+    this.actionError = "";
+    this.sent = "";
+    cx.notify();
+    cx.spawn(async cx => {
+      try {
+        const human = humanScope(await this.cli("whoami", scope.board));
+        if (!sameHuman(human, scope) || !sameHuman(scope, this.scope)) throw Error("Board identity changed; reaction refused");
+        const result = parseReply(await this.execBoard(args), "react");
+        if (result.message?.id !== id || result.outcome !== (remove ? "unreacted" : "reacted")) throw Error("No matching reaction receipt");
+        const snapshot = await this.cli("read", scope.board, readArgs(route));
+        if (snapshot.message?.id !== route.id || snapshot.message.channel !== route.channel || !Array.isArray(snapshot.replies)) throw Error("Invalid thread readback");
+        const changed = messageInThread(snapshot, id);
+        if (!changed || changed.deleted || !changed.reactions || typeof changed.reactions !== "object") throw Error("Reaction readback unavailable");
+        const observed = reactionsFor(changed, scope.actor).find(r => r.name === name)?.own ?? false;
+        if (observed !== !remove) throw Error("Reaction differs from requested state; reread Board");
+        this.detailSeq++;
+        this.detailLoading = false;
+        this.detailData = snapshot;
+        this.sent = remove ? "Reaction removed" : "Reaction added";
+      } catch (error) {
+        this.actionError = "Reaction not confirmed. Check Board before trying again. " + errorText(error);
+      } finally {
+        this.nativeAction = false;
+        this.sending = false;
+        this.seq++; this.loading = false;
+        this.detailSeq++; this.detailLoading = false;
+        if (!this.route.before) this.refresh(cx);
+        if (this.detail) this.refreshDetail(cx);
+        cx.notify();
+      }
+    });
+  }
+
+  downloadAttachment(cx, messageId, attachmentId) {
+    if (checking() || this.pending || this.sending || !this.scope) return;
+    const message = this.detailMessage(messageId);
+    const attachment = attachmentRows(message).find(a => a.id === attachmentId);
+    if (!attachment) return;
+    const scope = this.scope, args = downloadArgs(scope, message, attachmentId);
+    this.sending = true;
+    this.nativeAction = true;
+    this.actionError = "";
+    this.sent = "";
+    cx.notify();
+    cx.spawn(async cx => {
+      try {
+        const cwd = await pickFolder({ prompt: "Save Board attachment" });
+        if (!cwd) return;
+        const human = humanScope(await this.cli("whoami", scope.board, {}, { cwd }));
+        if (!sameHuman(human, scope) || !sameHuman(scope, this.scope)) throw Error("Board identity changed; download refused");
+        const result = parseReply(await this.execBoard(args, { cwd, timeout: 120000 }), "download");
+        if (result.outcome !== "downloaded" || result.attachment?.id !== attachmentId) throw Error("No matching download receipt");
+        this.sent = "Attachment saved: " + attachment.name;
+      } catch (error) {
+        this.actionError = "Download not confirmed. Check the selected folder. " + errorText(error);
+      } finally {
+        this.nativeAction = false;
+        this.sending = false;
+        cx.notify();
+      }
+    });
+  }
+
+  actorLabel(id) {
+    if (!id) return null;
+    if (id === this.scope?.actor) return "You";
+    return this.actors.find(a => a.id === id)?.handle ?? "Actor not in loaded directory";
+  }
+
+  taskInfo(message, t, compact) {
+    const task = nativeTask(message);
+    if (!task) return null;
+    if (task.unavailable) return label("Task details unavailable · read its thread", t);
+    const reason = task.blocked ?? task.reason ?? task.result;
+    const holder = this.actorLabel(task.holder);
+    const assigned = this.actorLabel(task.assigned);
+    const owner = this.actorLabel(task.owner);
+    return v_flex().gap(4).min_w(0)
+      .child(h_flex().items_center().gap(UI.gap)
+        .child(div().font_medium().text_color(task.state === "blocked" || task.state === "failed" ? (t.blocked ?? t.foreground) : t.foreground).child("Task · " + task.state))
+        .when(!!holder, e => e.child(label("Claimed by " + holder, t)))
+        .when(!holder && !!assigned, e => e.child(label("Assigned to " + assigned, t))))
+      .when(!!reason, e => e.child(div().min_w(0).text_color(t.muted).child(compact ? reason.slice(0, 200) : reason)))
+      .when(!compact && !!owner, e => e.child(label("Owner · " + owner, t)))
+      .when(!compact && !!task.until, e => e.child(label("Claim until " + task.until, t)))
+      .when(task.needs.length > 0, e => e.child(label(task.needs.length + " prerequisite task(s)", t)));
+  }
+
+  artifactInfo(message, t, compact) {
+    const rows = attachmentRows(message);
+    return v_flex().gap(4).min_w(0)
+      .when(compact && rows.length > 0, e => e.child(label(rows.length + " attachment(s)", t)))
+      .when(!compact, e => e.children(rows.map(a => h_flex().items_center().gap(UI.gap).min_w(0)
+        .child(v_flex().flex_1().min_w(0)
+          .child(div().truncate().text_color(t.foreground).child(a.name))
+          .child(label(a.type + " · " + a.size + " bytes", t)))
+        .child(button("attachment-" + message.id + "-" + a.id, "Save", t, (_e, cx) => this.downloadAttachment(cx, message.id, a.id), !this.pending && !this.sending)))));
+  }
+
+  feedbackInfo(message, t, compact) {
+    const rows = reactionsFor(message, this.scope?.actor, !compact);
+    if (!rows.length) return null;
+    if (compact) return label(rows.map(r => r.title + " " + r.count).join("  "), t);
+    return h_flex().gap(4).items_center()
+      .children(rows.map(r => button("reaction-" + message.id + "-" + r.name,
+        r.title + (r.count ? " " + r.count : "") + (r.own ? " · you" : ""), t,
+        (_e, cx) => this.react(cx, message.id, r.name), !this.pending && !this.sending)));
+  }
+
   row(id, text, t, on, action, enabled = true) {
     return h_flex().id(id).h(UI.row).px(UI.gap).gap(UI.gap).rounded(UI.radius).items_center().flex_none()
       .when(on, e => e.bg(t.selected)).text_color(on ? t.foreground : t.muted)
@@ -454,8 +580,13 @@ export default class HBoard extends View {
         .child(v_flex().min_w(0).gap(4)
           .when(!compact && own, e => e.p(UI.gap).rounded(UI.radius).bg(t.selected))
           .when(first !== null, e => e.child(div().font_medium().text_color(t.foreground).child(first)))
-          .child(div().min_w(0).text_color(m.deleted ? t.dim : t.foreground).child(rest)))
-        .when(!m.deleted && !!m.attachments?.length, e => e.child(label(m.attachments.length + " attachment(s) · read in Board", t))));
+          .child(!compact && !m.deleted && safeMarkdown(rest)
+            ? TextView.markdown("board-markdown-" + m.id, rest).scrollable(false).min_w(0)
+            : div().min_w(0).text_color(m.deleted ? t.dim : t.foreground).child(rest)))
+        .when(visibleLabels(m, compact).length > 0, e => e.child(label(visibleLabels(m, compact).map(([k,v]) => k + ": " + v).join("  ·  "), t)))
+        .when(!!nativeTask(m), e => e.child(this.taskInfo(m, t, compact)))
+        .when(attachmentRows(m).length > 0, e => e.child(this.artifactInfo(m, t, compact)))
+        .when(reactionsFor(m, this.scope?.actor, !compact).length > 0, e => e.child(this.feedbackInfo(m, t, compact))));
   }
 
   content(t) {
@@ -488,7 +619,7 @@ export default class HBoard extends View {
       .child(h_flex().gap(UI.gap).items_center()
         .child(div().flex_1())
         .when(!!this.pending && !this.sending, e => e.child(button("forget", "Forget unconfirmed send", t, (_e, cx) => { this.pending = null; this.actionError = "Unconfirmed send forgotten locally. Check Board before posting again."; cx.notify(); })))
-        .child(button("send", this.sending ? "Sending…" : this.pending ? "Retry same send" : route.kind === "thread" ? "Reply" : "Post", t, (_e, cx) => this.send(cx), !this.sending && (!!this.pending || !!this.draft.value().trim()), true)));
+        .child(button("send", this.sending ? (this.nativeAction ? "Updating…" : "Sending…") : this.pending ? "Retry same send" : route.kind === "thread" ? "Reply" : "Post", t, (_e, cx) => this.send(cx), !this.sending && (!!this.pending || !!this.draft.value().trim()), true)));
   }
 
   menuButton(t) {

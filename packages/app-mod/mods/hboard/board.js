@@ -220,3 +220,79 @@ export function toggleFollow(prefs, message) {
   if (followed.length === prefs.followed.length) followed.unshift({ id: message.id, channel: message.channel });
   return { ...prefs, followed: followed.slice(0, 30) };
 }
+
+// Native TextView can render Markdown and open HTTP(S) links on explicit
+// activation. Do not hand it raw HTML or image markup: its document image
+// renderer may otherwise request a remote resource during layout.
+export function safeMarkdown(text) {
+  return typeof text === "string" && !text.includes("<") && !text.includes("![");
+}
+
+const FEEDBACK = Object.freeze({ thumbs_up: "👍", eyes: "👀", check: "✅" });
+export function reactionsFor(message, actor, offer = false) {
+  const values = message?.reactions;
+  if (message?.deleted || !values || typeof values !== "object" || Array.isArray(values)) return [];
+  const rows = [];
+  for (const [name, members] of Object.entries(values)) {
+    if (!/^[a-z0-9_+-]{1,80}$/.test(name) || !Array.isArray(members) || !members.every(id => typeof id === "string")) continue;
+    const actors = [...new Set(members)];
+    if (actors.length || offer) rows.push({ name, title: FEEDBACK[name] ?? ":" + name + ":", actors, count: actors.length, own: actors.includes(actor) });
+  }
+  if (offer) for (const [name, title] of Object.entries(FEEDBACK)) {
+    if (!rows.some(r => r.name === name)) rows.push({ name, title, actors: [], count: 0, own: false });
+  }
+  return rows;
+}
+
+export function attachmentRows(message) {
+  if (message?.deleted || !Array.isArray(message?.attachments)) return [];
+  return message.attachments.filter(a => a && typeof a.id === "string" &&
+    /^(?:[A-Za-z0-9_-]{22}|att_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.test(a.id) &&
+    typeof a.name === "string" && typeof a.type === "string" &&
+    Number.isSafeInteger(a.size) && a.size >= 0).map(a => ({
+      id: a.id, name: a.name, type: a.type, size: a.size,
+    }));
+}
+
+export function messageInThread(snapshot, id) {
+  if (snapshot?.message?.id === id) return snapshot.message;
+  return Array.isArray(snapshot?.replies) ? snapshot.replies.find(m => m?.id === id) ?? null : null;
+}
+
+export function reactionArgs(scope, message, name, remove) {
+  if (!message || message.deleted || typeof message.id !== "string" ||
+      !reactionsFor(message, scope.actor, true).some(r => r.name === name)) throw Error("Reaction target unavailable");
+  return argv("react", { board: scope.board, flags: remove ? ["--remove"] : [], args: [message.id, name] });
+}
+
+export function downloadArgs(scope, message, id) {
+  if (!attachmentRows(message).some(a => a.id === id)) throw Error("Attachment unavailable");
+  // No destination filename argument. The official CLI writes exclusively
+  // using its sanitized filename in the user-selected working directory.
+  return argv("download", { board: scope.board, args: [id] });
+}
+
+const TASK_STATES = new Set(["waiting", "ready", "claimed", "blocked", "completed", "failed", "canceled"]);
+export function nativeTask(message) {
+  if (message?.deleted) return null;
+  const t = message?.task;
+  if (!t || typeof t !== "object" || !TASK_STATES.has(t.state)) {
+    return message?.labels?.["board.task"] !== undefined ? { unavailable: true } : null;
+  }
+  // Read only the public projection, never propagate claim secrets or infer
+  // readiness from time, labels or dependencies on the client.
+  const value = s => typeof s === "string" && s.length ? s : null;
+  return {
+    state: t.state, owner: value(t.owner), assigned: value(t.for),
+    holder: value(t.claim?.actor), until: value(t.claim?.until),
+    blocked: value(t.blocked?.reason), result: value(t.result), reason: value(t.reason),
+    needs: Array.isArray(t.needs) ? t.needs.filter(id => typeof id === "string") : [],
+  };
+}
+
+export function visibleLabels(message, compact) {
+  if (message?.deleted || !message?.labels || typeof message.labels !== "object" || Array.isArray(message.labels)) return [];
+  return Object.entries(message.labels).filter(([key, value]) => typeof value === "string" &&
+    /^[a-z0-9][a-z0-9_.-]{0,63}$/.test(key) &&
+    key !== "board.task" && (!compact || key === "project" || key === "kind"));
+}

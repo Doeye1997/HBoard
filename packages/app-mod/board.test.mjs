@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, generalRoute, isGeneral, canComposeRoute, terminalPane, threadRoute, draftKey, workspacePanes, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, signature, threadSummary, readMarker, isUnread, toggleFollow } from "./mods/hboard/board.js";
+import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, generalRoute, isGeneral, canComposeRoute, terminalPane, threadRoute, draftKey, workspacePanes, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, signature, threadSummary, readMarker, isUnread, toggleFollow, safeMarkdown, reactionsFor, attachmentRows, messageInThread, reactionArgs, downloadArgs, nativeTask, visibleLabels } from "./mods/hboard/board.js";
 const scope = { board: "https://board.example/v1/boards/b?teamId=t", actor: "person", handle: "me" };
 const actor = { id: "person+worker", handle: "me/worker" };
 const root = { id: "msg_1", channel: "dev", version: 1, text: "root" };
@@ -141,4 +141,45 @@ test("General stays in a wide workspace and native terminal replaces only the de
     { compact: true, split: false, showNav: true, showFeed: false, showThread: false });
   assert.deepEqual(workspacePanes(620, false, true, false),
     { compact: true, split: false, showNav: false, showFeed: true, showThread: false });
+});
+
+test("native Markdown accepts prose and links but never hands embedded HTML or images to the renderer", () => {
+  assert.equal(safeMarkdown("# Report\n- done\n[PR](https://github.com/example/repo/pull/1)"), true);
+  assert.equal(safeMarkdown("![tracking](https://example.com/pixel)"), false);
+  assert.equal(safeMarkdown("![image][ref]\n[ref]: https://example.com/pixel"), false);
+  assert.equal(safeMarkdown("<img src='https://example.com/pixel'>"), false);
+});
+
+test("native reaction identity is canonical and remove targets only the selected message", () => {
+  const m = { id: "msg_1", reactions: { thumbs_up: ["person", "other", "other"], eyes: ["other"] } };
+  assert.deepEqual(reactionsFor(m, "person", false)[0], { name: "thumbs_up", title: "👍", actors: ["person", "other"], count: 2, own: true });
+  assert.equal(reactionsFor(m, "person", true).find(r => r.name === "check").count, 0);
+  assert.deepEqual(reactionArgs(scope, m, "thumbs_up", true), ["board", "react", "--url", scope.board, "--json", "--remove", "--", "msg_1", "thumbs_up"]);
+  assert.equal(messageInThread({message: m, replies: [{id:"msg_2"}]}, "msg_2").id, "msg_2");
+  assert.equal(reactionsFor({...m, deleted:true}, "person", true).length, 0);
+  assert.throws(() => reactionArgs(scope, m, "--danger", false), /unavailable/);
+});
+
+test("attachment download has no explicit overwrite path and only uses an actual attachment ID", () => {
+  const attachment = { id: "att_12345678-1234-1234-1234-123456789012", name: "../evidence.txt", type: "text/plain", size: 5 };
+  const m = { id: "msg_1", attachments: [attachment, { id: "wrong/path", name: "bad", type: "x", size: 1 }] };
+  assert.deepEqual(attachmentRows(m), [attachment]);
+  assert.deepEqual(downloadArgs(scope, m, attachment.id), ["board", "download", "--url", scope.board, "--json", "--", attachment.id]);
+  assert.throws(() => downloadArgs(scope, m, "wrong/path"), /unavailable/);
+});
+
+test("task and labels are read projections, not a local task state machine", () => {
+  const m = { labels: { "board.task": "claimed", project: "JSON", kind: "review", custom: "x" }, task: {
+    state: "claimed", owner: "person", for: "person+worker",
+    claim: { actor: "person+worker", until: "2020-01-01", token: "secret" }, needs: ["msg_0"], blocked: null, result: null, reason: null
+  }};
+  const t = nativeTask(m);
+  assert.equal(t.state, "claimed");
+  assert.equal(t.holder, "person+worker");
+  assert.equal(JSON.stringify(t).includes("secret"), false);
+  assert.deepEqual(t.needs, ["msg_0"]);
+  assert.deepEqual(nativeTask({labels:{"board.task":"ready"}}), { unavailable:true });
+  assert.equal(nativeTask({ labels: { kind: "task" } }), null);
+  assert.deepEqual(visibleLabels(m, true), [["project","JSON"],["kind","review"]]);
+  assert.deepEqual(visibleLabels(m, false), [["project","JSON"],["kind","review"],["custom","x"]]);
 });
