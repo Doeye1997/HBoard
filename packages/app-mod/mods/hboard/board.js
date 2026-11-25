@@ -45,11 +45,39 @@ export function inboxPageArgs(channel) {
   return { flags: ["--limit", "30"], args: [channelName(channel)] };
 }
 
+// General is a Board channel, not a synthetic cross-channel feed.
+export function generalRoute() {
+  return { kind: "channel", channel: "general" };
+}
+
+export function isGeneral(route) {
+  return route?.kind === "channel" && route.channel === "general";
+}
+
+// A successful authoritative read is required before composing in a channel.
+// Missing/forbidden channels must not look like writable empty channels.
+export function canComposeRoute(scope, route, data, readError) {
+  if (!scope || readError || !data) return false;
+  if (route?.kind === "channel") return Array.isArray(data.threads);
+  return route?.kind === "thread" && data.message?.id === route.id && !data.message.deleted;
+}
+
+// Read the actual personal layout; never maintain a second visibility flag.
+export function terminalPane(layout) {
+  if (!layout || typeof layout !== "object") return null;
+  if (layout.id === "hboard-terminal") return layout;
+  for (const child of Array.isArray(layout.children) ? layout.children : []) {
+    const found = terminalPane(child);
+    if (found) return found;
+  }
+  return null;
+}
+
 export function readArgs(route) {
   if (route.kind === "thread") return { args: [route.id] };
   if (route.kind === "inbox") throw Error("Inbox reads each loaded channel; it has no whole-board query");
   if (route.kind === "channel") return {
-    flags: ["--limit", "30", ...(route.before ? ["--before", route.before] : [])], args: [route.channel],
+    flags: ["--limit", "30", ...(route.before ? ["--before", route.before] : [])], args: [channelName(route.channel)],
   };
   throw Error("Unknown Board view");
 }
@@ -99,11 +127,16 @@ export function sendArgs(intent) {
 }
 
 export function parseReply(output, operation) {
-  let value;
+  let value, failure;
   try { value = JSON.parse(output.stdout); } catch { /* no structured result */ }
-  if (output.code !== 0 || !value || typeof value !== "object") {
-    const reason = typeof value?.reason === "string" && /^[a-z_]+$/.test(value.reason) ? ": " + value.reason : "";
-    throw Error("Board " + operation + " failed" + reason + " (exit " + output.code + ")");
+  // Official CLI failures are JSON on stderr. Never echo arbitrary CLI output.
+  if (output.code !== 0) {
+    try { failure = JSON.parse(output.stderr); } catch { /* older CLI may use stdout */ }
+    const reason = [failure?.reason, value?.reason].find(r => typeof r === "string" && /^[a-z_]{1,80}$/.test(r));
+    throw Error("Board " + operation + " failed" + (reason ? ": " + reason : "") + " (exit " + output.code + ")");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw Error("Board " + operation + " failed (invalid JSON result)");
   }
   return value;
 }

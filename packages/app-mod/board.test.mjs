@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, signature, threadSummary, readMarker, isUnread, toggleFollow } from "./mods/hboard/board.js";
+import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, generalRoute, isGeneral, canComposeRoute, terminalPane, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, signature, threadSummary, readMarker, isUnread, toggleFollow } from "./mods/hboard/board.js";
 const scope = { board: "https://board.example/v1/boards/b?teamId=t", actor: "person", handle: "me" };
 const actor = { id: "person+worker", handle: "me/worker" };
 const root = { id: "msg_1", channel: "dev", version: 1, text: "root" };
@@ -85,4 +85,36 @@ test("Windows CLI invocation preserves arbitrary composer text as one literal ar
   assert.equal(invocation.args.at(-1), text);
   assert.deepEqual(boardInvocation(transport, argv("whoami", { board: scope.board })).args,
     [transport.prefix[0], ...argv("whoami", { board: scope.board })]);
+});
+
+test("General reads the exact native channel without a directory dependency or write", () => {
+  const route = generalRoute();
+  assert.equal(isGeneral(route), true);
+  assert.equal(isGeneral({ kind: "channel", channel: "general/archive" }), false);
+  assert.deepEqual(argv("read", { board: scope.board, ...readArgs(route) }),
+    ["board", "read", "--url", scope.board, "--json", "--limit", "30", "--", "general"]);
+  assert.equal(canComposeRoute(scope, route, null, ""), false);
+  assert.equal(canComposeRoute(scope, route, { threads: [] }, ""), true);
+  assert.equal(canComposeRoute(scope, route, { threads: [] }, "channel_not_found"), false);
+  assert.equal(canComposeRoute(null, route, { threads: [] }, ""), false);
+  assert.equal(canComposeRoute(scope, { kind: "thread", id: "msg_1" }, { message: root }, ""), true);
+  assert.equal(canComposeRoute(scope, { kind: "thread", id: "msg_2" }, { message: root }, ""), false);
+  assert.equal(canComposeRoute(scope, { kind: "thread", id: "msg_1" }, { message: { ...root, deleted: true } }, ""), false);
+});
+
+test("official stderr reason survives, without exposing raw diagnostics", () => {
+  assert.throws(() => parseReply({ code: 1, stdout: "", stderr: '{"reason":"channel_not_found","message":"secret text"}' }, "read"),
+    /^Error: Board read failed: channel_not_found \(exit 1\)$/);
+  assert.throws(() => parseReply({ code: 1, stdout: "", stderr: "secret text" }, "read"),
+    /^Error: Board read failed \(exit 1\)$/);
+  assert.throws(() => parseReply({ code: 0, stdout: "[]" }, "read"), /invalid JSON result/);
+});
+
+test("terminal visibility comes from the actual native layout, including nested nodes", () => {
+  const hidden = { id: "hboard-terminal", hidden: true, children: [] };
+  const tree = { id: "root", children: [{ id: "body", children: [hidden] }] };
+  assert.equal(terminalPane(tree), hidden);
+  assert.equal(terminalPane(tree).hidden, true);
+  assert.equal(terminalPane({ id: "root", children: [] }), null);
+  assert.equal(terminalPane(null), null);
 });
