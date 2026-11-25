@@ -73,6 +73,36 @@ export function terminalPane(layout) {
   return null;
 }
 
+// The list is a location; the selected thread is a separate reading context.
+export function threadRoute(message) {
+  const id = message?.id;
+  if (typeof id !== "string" || !id || id.startsWith("-")) throw Error("Invalid thread root");
+  return { kind: "thread", id, channel: channelName(message.channel) };
+}
+
+export function draftKey(route) {
+  if (route?.kind === "thread") return JSON.stringify(["thread", route.channel, route.id]);
+  if (route?.kind === "channel") return JSON.stringify(["channel", route.channel]);
+  return null;
+}
+
+// Width is the actual Mod viewport, excluding a native terminal when shown.
+// A narrow window offers a full reading surface and an explicit menu.
+export function workspacePanes(width, hasThread, terminalVisible, menuOpen) {
+  const available = Number.isFinite(width) && width > 0 ? width : 1440;
+  const compact = available < 760;
+  const menu = compact && menuOpen;
+  const detail = hasThread && !terminalVisible;
+  const split = detail && available >= 1060;
+  return {
+    compact,
+    split,
+    showNav: !compact || menu,
+    showFeed: !menu && (!detail || split),
+    showThread: !menu && detail,
+  };
+}
+
 export function readArgs(route) {
   if (route.kind === "thread") return { args: [route.id] };
   if (route.kind === "inbox") throw Error("Inbox reads each loaded channel; it has no whole-board query");

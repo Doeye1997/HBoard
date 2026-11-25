@@ -1,12 +1,11 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, ScrollHandle } from "gpui-base";
 import { exec, appHome, checking, props, run, theme, terminals, window, layout } from "herdr";
-import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, generalRoute, isGeneral, canComposeRoute, terminalPane, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, messageName, threadSummary, readMarker, isUnread, toggleFollow } from "./board.js";
+import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, generalRoute, isGeneral, canComposeRoute, terminalPane, threadRoute, draftKey, workspacePanes, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, messageName, threadSummary, readMarker, isUnread, toggleFollow } from "./board.js";
 
 // Adopt the Herdr native theme and the spacing/typography scale of its panels.
-const UI = { rail: 216, pad: 12, gap: 8, row: 30, radius: 7, small: 11.5, text: 13, heading: 16, composer: 92 };
+const UI = { rail: 208, detail: 416, pad: 16, gap: 8, row: 32, radius: 10, small: 12, text: 14, heading: 20, composer: 72, avatar: 32 };
 const EMPTY = () => ({ seen: {}, followed: [] });
-const routeKey = r => JSON.stringify(r);
 const scopeKey = s => "hboard.attention:" + JSON.stringify([s.board, s.actor]);
 const errorText = e => String(e?.message ?? e).slice(0, 500);
 const time = m => m.createdAt ? new Date(m.createdAt).toLocaleString() : "";
@@ -15,9 +14,9 @@ const label = (text, t) => div().text_size(UI.small).text_color(t.dim).child(tex
 
 function button(id, text, t, action, enabled = true, primary = false) {
   return h_flex().id(id).h(UI.row).px(UI.gap).rounded(UI.radius).items_center().flex_none()
-    .text_size(UI.text).text_color(!enabled ? t.dim : primary ? t.solid_foreground : t.foreground)
-    .bg(primary && enabled ? t.solid : t.raised)
-    .when(enabled, e => e.cursor_pointer().hover(s => s.opacity(0.85)).on_click(action)).child(text);
+    .text_size(UI.text).text_color(!enabled ? t.dim : primary ? t.solid_foreground : t.muted)
+    .when(primary, e => e.bg(enabled ? t.solid : t.raised))
+    .when(enabled, e => e.cursor_pointer().hover(s => primary ? s.opacity(0.85) : s.bg(t.hover)).on_click(action)).child(text);
 }
 
 async function resolveBoardCli() {
@@ -45,7 +44,16 @@ export default class HBoard extends View {
     this.inboxNote = "";
     this.data = null;
     this.seq = 0;
+    this.detailSeq = 0;
     this.focusSeq = 0;
+    this.detail = null;
+    this.detailData = null;
+    this.detailLoading = false;
+    this.detailReadError = "";
+    this.viewportWidth = 0;
+    this.menuOpen = false;
+    this.feedScroll = ScrollHandle.new();
+    this.threadScroll = ScrollHandle.new();
     this.prefs = EMPTY();
     this.drafts = new Map();
     this.endpoint = InputState.new({ value: props()?.url ?? localStorage.getItem("hboard.endpoint") ?? "", placeholder: "Optional Board URL (use CLI login by default)" });
@@ -53,6 +61,7 @@ export default class HBoard extends View {
     this.draft.on("change", (_event, cx) => cx.notify());
     if (!checking()) cx.timer.every(15000, cx => {
       if (this.scope && !this.loading && !this.sending && !this.route.before && this.route.kind !== "following") this.refresh(cx);
+      if (this.scope && this.detail && !this.detailLoading && !this.sending && !this.terminalVisible()) this.refreshDetail(cx);
     });
   }
 
@@ -77,6 +86,10 @@ export default class HBoard extends View {
   connect(cx) {
     if (checking() || this.connecting || this.pending || this.sending) return;
     const seq = ++this.seq;
+    this.clearDetail();
+    this.focusSeq++;
+    this.focusing = null;
+    this.menuOpen = false;
     this.scope = null;
     this.transport = null;
     this.inboxNote = "";
@@ -122,19 +135,56 @@ export default class HBoard extends View {
 
   savePrefs() { if (this.scope) localStorage.setItem(scopeKey(this.scope), JSON.stringify(this.prefs)); }
 
+  composeRoute() { return this.detail ?? this.route; }
+
+  saveDraft() {
+    const key = draftKey(this.composeRoute());
+    if (key !== null) this.drafts.set(key, this.draft.value());
+  }
+
+  restoreDraft() {
+    this.draft.set_value(this.drafts.get(draftKey(this.composeRoute())) ?? "");
+  }
+
+  clearDetail() {
+    this.detailSeq++;
+    this.detail = null;
+    this.detailData = null;
+    this.detailLoading = false;
+    this.detailReadError = "";
+  }
+
+  terminalVisible() {
+    const node = terminalPane(layout());
+    return !!node && !node.hidden;
+  }
+
+  hideTerminal(cx, refresh = true) {
+    this.focusSeq++;
+    this.focusing = null;
+    if (this.terminalVisible()) run("layout.hide", { id: "hboard-terminal" });
+    if (refresh && this.detail) this.refreshDetail(cx);
+    cx.notify();
+  }
+
   navigate(route, cx) {
     if (this.pending || this.sending || this.connecting) return;
-    this.drafts.set(routeKey(this.route), this.draft.value());
+    this.saveDraft();
+    this.clearDetail();
+    this.focusSeq++;
+    this.focusing = null;
     this.seq++;
     this.route = route;
+    this.menuOpen = false;
+    this.feedScroll = ScrollHandle.new();
     this.data = null;
     this.loading = false;
     this.readError = "";
     this.actionError = "";
     this.sent = "";
-    this.draft.set_value(this.drafts.get(routeKey(route)) ?? "");
+    this.restoreDraft();
     if (route.kind === "following") cx.notify();
-    else this.refresh(cx, route.kind === "thread");
+    else this.refresh(cx);
   }
 
   async readInbox(scope) {
@@ -160,7 +210,7 @@ export default class HBoard extends View {
   }
 
 
-  refresh(cx, mark = false) {
+  refresh(cx) {
     if (checking() || !this.scope || this.loading || this.sending || this.route.kind === "following") return;
     const scope = this.scope, route = this.route, seq = ++this.seq;
     this.loading = true;
@@ -170,11 +220,7 @@ export default class HBoard extends View {
       try {
         const data = route.kind === "inbox" ? await this.readInbox(scope) : await this.cli("read", scope.board, readArgs(route));
         if (seq !== this.seq || !sameHuman(scope, this.scope)) return;
-        if (route.kind === "thread") {
-          if (data.message?.id !== route.id) throw Error("Board returned a different thread root");
-          array(data.replies, "replies");
-          if (mark) { this.prefs = readMarker(this.prefs, threadSummary(data)); this.savePrefs(); }
-        } else if (route.kind === "inbox") {
+        if (route.kind === "inbox") {
           this.inboxNote = data.note;
           this.data = { threads: data.threads };
         } else array(data.threads, "threads");
@@ -183,6 +229,30 @@ export default class HBoard extends View {
         if (seq === this.seq) this.readError = errorText(error);
       } finally {
         if (seq === this.seq) { this.loading = false; cx.notify(); }
+      }
+    });
+  }
+
+  refreshDetail(cx, mark = false) {
+    if (checking() || !this.scope || !this.detail || this.detailLoading || this.sending) return;
+    const scope = this.scope, route = this.detail, seq = ++this.detailSeq;
+    this.detailLoading = true;
+    this.detailReadError = "";
+    cx.notify();
+    cx.spawn(async cx => {
+      try {
+        const data = await this.cli("read", scope.board, readArgs(route));
+        if (seq !== this.detailSeq || !sameHuman(scope, this.scope)) return;
+        if (data.message?.id !== route.id || data.message.channel !== route.channel) {
+          throw Error("Board returned a different thread root or channel");
+        }
+        array(data.replies, "replies");
+        this.detailData = data;
+        if (mark) { this.prefs = readMarker(this.prefs, threadSummary(data)); this.savePrefs(); }
+      } catch (error) {
+        if (seq === this.detailSeq) this.detailReadError = errorText(error);
+      } finally {
+        if (seq === this.detailSeq) { this.detailLoading = false; cx.notify(); }
       }
     });
   }
@@ -222,7 +292,32 @@ export default class HBoard extends View {
   }
 
   openThread(message, cx) {
-    this.navigate({ kind: "thread", id: message.id, channel: message.channel }, cx);
+    if (this.pending || this.sending || this.connecting || !this.scope) return;
+    let route;
+    try { route = threadRoute(message); }
+    catch (error) { this.actionError = errorText(error); cx.notify(); return; }
+    // Keep the feed, its current page, and its scroll handle untouched.
+    this.saveDraft();
+    this.clearDetail();
+    this.detail = route;
+    this.menuOpen = false;
+    this.threadScroll = ScrollHandle.new();
+    this.actionError = "";
+    this.sent = "";
+    this.restoreDraft();
+    this.hideTerminal(cx, false);
+    this.refreshDetail(cx, true);
+    cx.notify();
+  }
+
+  closeThread(cx) {
+    if (this.pending || this.sending) return;
+    this.saveDraft();
+    this.clearDetail();
+    this.actionError = "";
+    this.sent = "";
+    this.restoreDraft();
+    cx.notify();
   }
 
   mention(actor, cx) {
@@ -234,7 +329,7 @@ export default class HBoard extends View {
 
   openActor(actor, cx) {
     const profile = actorProfile(actor);
-    if (checking() || !profile || !this.scope) return;
+    if (checking() || !profile || !this.scope || this.pending || this.sending) return;
     const scope = this.scope, seq = ++this.focusSeq;
     this.actionError = ""; this.focusing = actor.id; cx.notify();
     cx.spawn(async cx => {
@@ -255,13 +350,18 @@ export default class HBoard extends View {
     });
   }
 
-  canCompose() { return canComposeRoute(this.scope, this.route, this.data, this.readError); }
+  canCompose() {
+    if (this.detail && this.terminalVisible()) return false;
+    return canComposeRoute(this.scope, this.composeRoute(),
+      this.detail ? this.detailData : this.data,
+      this.detail ? this.detailReadError : this.readError);
+  }
 
   send(cx) {
     if (checking() || this.sending || (!this.pending && !this.canCompose())) return;
     let intent;
     try {
-      intent = this.pending ?? createSend(this.scope, this.route, this.draft.value(),
+      intent = this.pending ?? createSend(this.scope, this.composeRoute(), this.draft.value(),
         "hboard-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2) + "-" + Math.random().toString(36).slice(2));
     } catch (error) { this.actionError = errorText(error); cx.notify(); return; }
     const previouslyUnconfirmed = !!this.pending;
@@ -280,8 +380,8 @@ export default class HBoard extends View {
         }
         this.pending = null;
         this.draft.set_value("");
-        this.drafts.delete(routeKey(this.route));
-        this.sent = "Posted · " + m.id;
+        this.drafts.delete(draftKey(this.composeRoute()));
+        this.sent = intent.command === "reply" ? "Reply posted" : "Posted";
       } catch (error) {
         if (!invoked && !previouslyUnconfirmed) this.pending = null;
         this.actionError = (this.pending ? "Send unconfirmed. Check the thread before retrying the same operation. " : "") + errorText(error);
@@ -289,8 +389,12 @@ export default class HBoard extends View {
         this.sending = false;
         // Invalidate any read that started before the write completed.
         this.seq++; this.loading = false;
-        if (!this.pending && this.route.kind === "channel" && this.route.before) this.navigate({ kind: "channel", channel: this.route.channel }, cx);
-        else this.refresh(cx);
+        this.detailSeq++; this.detailLoading = false;
+        if (!this.pending && !this.detail && this.route.kind === "channel" && this.route.before) this.navigate({ kind: "channel", channel: this.route.channel }, cx);
+        else {
+          if (!this.route.before) this.refresh(cx);
+          if (this.detail) this.refreshDetail(cx);
+        }
         cx.notify();
       }
     });
@@ -303,15 +407,19 @@ export default class HBoard extends View {
       .child(div().flex_1().min_w(0).truncate().child(text));
   }
 
-  sidebar(t) {
+  sidebar(t, compact = false) {
     const enabled = !this.pending && !this.sending && !this.connecting;
     const channel = this.route.channel;
     const unread = this.route.kind === "inbox" && this.data?.threads ? this.data.threads.filter(s => isUnread(this.prefs, s)).length : null;
-    return v_flex().w(UI.rail).h_full().flex_none().min_h(0).bg(t.chrome).p(UI.pad).gap(UI.gap)
-      .child(div().font_semibold().text_size(UI.heading).child("HBoard"))
+    return v_flex().h_full().min_h(0).bg(t.chrome).p(UI.pad).rounded(UI.radius).gap(UI.gap)
+      .when(compact, e => e.flex_1().min_w(0))
+      .when(!compact, e => e.w(UI.rail).flex_none())
+      .child(h_flex().items_center().gap(UI.gap)
+        .child(div().flex_1().font_semibold().text_size(UI.heading).child("HBoard"))
+        .when(compact, e => e.child(button("close-menu", "Close", t, (_e, cx) => { this.menuOpen = false; cx.notify(); }))))
       .child(label(this.scope ? "@" + this.scope.handle : "Connect a Board", t))
       .when(!!this.scope, e => e
-        .child(this.row("general", "General", t, isGeneral(this.route) || (this.route.kind === "thread" && channel === "general"), (_e, cx) => this.navigate(generalRoute(), cx), enabled))
+        .child(this.row("general", "General", t, isGeneral(this.route), (_e, cx) => this.navigate(generalRoute(), cx), enabled))
         .child(this.row("inbox", unread === null ? "Inbox · mentions" : "Inbox · " + unread + " unread in page", t, this.route.kind === "inbox", (_e, cx) => this.navigate({ kind: "inbox" }, cx), enabled))
         .child(this.row("following", "Following", t, this.route.kind === "following", (_e, cx) => this.navigate({ kind: "following" }, cx), enabled))
         .child(label("CHANNELS", t))
@@ -323,20 +431,31 @@ export default class HBoard extends View {
           .children(this.actors.map(actor => h_flex().id("member-" + actor.id).items_center().gap(4).h(UI.row).flex_none()
             .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(actor.handle ?? actor.id))
             .child(button("mention-" + actor.id, "@", t, (_e, cx) => this.mention(actor, cx), this.canCompose() && enabled))
-            .when(!!actorProfile(actor), e => e.child(button("open-" + actor.id, this.focusing === actor.id ? "…" : "Open", t, (_e, cx) => this.openActor(actor, cx), !this.focusing)))))));
+            .when(!!actorProfile(actor), e => e.child(button("open-" + actor.id, this.focusing === actor.id ? "…" : "Open", t, (_e, cx) => this.openActor(actor, cx), !this.focusing && !this.pending && !this.sending)))))));
   }
 
   message(m, t, compact = false) {
     const actor = this.actors.find(a => a.id === m.by?.actor);
-    return v_flex().gap(4).min_w(0).flex_none()
-      .child(h_flex().items_center().gap(UI.gap)
-        .child(div().font_medium().text_color(t.foreground).min_w(0).truncate().child(messageName(m, this.actors)))
-        .child(div().flex_1())
-        .child(label(time(m), t))
-        .when(!!actorProfile(actor), e => e.child(button("message-open-" + m.id, "Open agent", t, (_e, cx) => this.openActor(actor, cx), !this.focusing))))
-      .child(div().min_w(0).text_color(m.deleted ? t.dim : t.foreground)
-        .child(m.deleted ? "[Deleted message]" : compact ? (m.text ?? "").slice(0, 240) : (m.text ?? "")))
-      .when(!m.deleted && !!m.attachments?.length, e => e.child(label(m.attachments.length + " attachment(s) · read in Board", t)));
+    const name = messageName(m, this.actors);
+    const text = m.deleted ? "[Deleted message]" : compact ? String(m.text ?? "").slice(0, 240) : String(m.text ?? "");
+    const firstNewline = compact && !m.deleted ? text.indexOf("\n") : -1;
+    const first = firstNewline > 0 ? text.slice(0, firstNewline) : null;
+    const rest = first !== null ? text.slice(firstNewline + 1) : text;
+    const own = this.scope?.actor === m.by?.actor;
+    return h_flex().gap(UI.gap).min_w(0).flex_none()
+      .child(h_flex().w(UI.avatar).h(UI.avatar).flex_none().rounded(8).bg(t.raised).items_center().justify_center()
+        .child(div().font_medium().text_color(t.muted).child(Array.from(name.replace(/^@/, ""))[0]?.toUpperCase() ?? "?")))
+      .child(v_flex().flex_1().min_w(0).gap(4)
+        .child(h_flex().items_center().gap(UI.gap)
+          .child(div().font_medium().text_color(t.foreground).min_w(0).truncate().child(name))
+          .child(label(time(m), t))
+          .child(div().flex_1())
+          .when(!!actorProfile(actor), e => e.child(button("message-open-" + m.id, "Terminal", t, (_e, cx) => this.openActor(actor, cx), !this.focusing && !this.pending && !this.sending))))
+        .child(v_flex().min_w(0).gap(4)
+          .when(!compact && own, e => e.p(UI.gap).rounded(UI.radius).bg(t.selected))
+          .when(first !== null, e => e.child(div().font_medium().text_color(t.foreground).child(first)))
+          .child(div().min_w(0).text_color(m.deleted ? t.dim : t.foreground).child(rest)))
+        .when(!m.deleted && !!m.attachments?.length, e => e.child(label(m.attachments.length + " attachment(s) · read in Board", t))));
   }
 
   content(t) {
@@ -345,11 +464,11 @@ export default class HBoard extends View {
       .children(this.prefs.followed.map(m => this.row("follow-" + m.id, "# " + m.channel + " · " + m.id, t, false, (_e, cx) => this.openThread(m, cx))))
       .when(!this.prefs.followed.length, e => e.child(label("No followed threads", t)));
     if (!this.data) return label(this.loading ? "Reading Board…" : "No data loaded", t);
-    if (this.route.kind === "thread") return v_flex().gap(UI.pad).children([this.data.message, ...this.data.replies].map(m => this.message(m, t)));
     const list = [...this.data.threads].reverse();
     return v_flex().gap(UI.gap)
       .when(!list.length, e => e.child(label(this.route.kind === "inbox" ? "No returned mention threads" : "No discussions", t)))
-      .children(list.map(s => v_flex().id("thread-" + s.message.id).p(UI.gap).rounded(UI.radius).gap(5).bg(t.surface)
+      .children(list.map(s => v_flex().id("thread-" + s.message.id).p(UI.gap).rounded(UI.radius).gap(4)
+        .when(this.detail?.id === s.message.id, e => e.bg(t.selected))
         .child(this.message(s.message, t, true))
         .child(h_flex().items_center().gap(UI.gap)
           .when(isUnread(this.prefs, s), e => e.child(label("Unread", t)))
@@ -360,57 +479,90 @@ export default class HBoard extends View {
 
   composer(t) {
     if (!this.canCompose() && !this.pending) return null;
+    const route = this.composeRoute();
     return v_flex().gap(UI.gap).flex_none()
-      .child(label(this.route.kind === "thread" ? "Reply in #" + this.route.channel : "Post to " + (isGeneral(this.route) ? "General" : "#" + this.route.channel), t))
+      .child(label(route.kind === "thread" ? "Reply in #" + route.channel : "Post to " + (isGeneral(route) ? "General" : "#" + route.channel), t))
       .when(!this.pending, e => e.child(Textarea.new(this.draft).h(UI.composer).px(UI.gap).rounded(UI.radius).border_1().border_color(t.input).bg(t.background).text_color(t.foreground)))
       .when(!!this.pending, e => e.child(div().text_color(t.muted).child(this.pending.text)))
       .child(label("Mention to notify · profiles share their person's credential", t))
       .child(h_flex().gap(UI.gap).items_center()
         .child(div().flex_1())
         .when(!!this.pending && !this.sending, e => e.child(button("forget", "Forget unconfirmed send", t, (_e, cx) => { this.pending = null; this.actionError = "Unconfirmed send forgotten locally. Check Board before posting again."; cx.notify(); })))
-        .child(button("send", this.sending ? "Sending…" : this.pending ? "Retry same send" : this.route.kind === "thread" ? "Reply" : "Post", t, (_e, cx) => this.send(cx), !this.sending && (!!this.pending || !!this.draft.value().trim()), true)));
+        .child(button("send", this.sending ? "Sending…" : this.pending ? "Retry same send" : route.kind === "thread" ? "Reply" : "Post", t, (_e, cx) => this.send(cx), !this.sending && (!!this.pending || !!this.draft.value().trim()), true)));
+  }
+
+  menuButton(t) {
+    return button("menu", "Menu", t, (_e, cx) => { this.menuOpen = true; cx.notify(); });
+  }
+
+  panel(t) {
+    return v_flex().h_full().min_w(0).min_h(0).p(UI.pad).gap(UI.gap)
+      .bg(t.background).rounded(UI.radius).border_1().border_color(t.border);
+  }
+
+  feedPane(t, panes, terminalVisible) {
+    const connected = !!this.scope, route = this.route;
+    const title = isGeneral(route) ? "General" : route.kind === "channel" ? "# " + route.channel : route.kind === "following" ? "Following" : "Inbox · mentions";
+    const showComposer = !this.detail && (this.canCompose() || !!this.pending);
+    return this.panel(t).flex_1()
+      .child(h_flex().items_center().gap(UI.gap).flex_none()
+        .when(panes.compact, e => e.child(this.menuButton(t)))
+        .child(div().flex_1().min_w(0).truncate().font_semibold().text_size(UI.heading).child(connected ? title : "Connect Board"))
+        .when(connected, e => e.child(button("refresh", this.loading ? "Reading…" : "Refresh", t, (_e, cx) => this.refresh(cx), !this.loading && !this.sending && route.kind !== "following")))
+        .when(!connected, e => e.child(button("connect", this.connecting ? "Connecting…" : "Connect", t, (_e, cx) => this.connect(cx), !this.connecting, true)))
+        .when(terminalVisible, e => e.child(button("hide-terminal", this.detail ? "Back to thread" : "Hide terminal", t, (_e, cx) => this.hideTerminal(cx))))
+        .child(button("herdr", "Herdr", t, () => run("layout.switch", { name: "main" }), !this.pending && !this.sending)))
+      .when(!connected, e => e.child(v_flex().gap(UI.gap).flex_none()
+        .child(label("Use the existing Vercel CLI login as a human, or enter a Board endpoint.", t))
+        .child(Input.new(this.endpoint).h(36).px(UI.gap).rounded(UI.radius).border_1().border_color(t.input).bg(t.surface).text_color(t.foreground))))
+      .when(connected, e => e
+        .child(h_flex().items_center().gap(UI.gap).flex_none()
+          .child(div().flex_1())
+          .child(button("directory", "Sync directory", t, (_e, cx) => this.syncDirectory(cx), !this.loadingChannels && !this.sending)))
+        .when(route.kind === "inbox", e => e.child(label(this.inboxNote || "Inbox covers only loaded channels and is not a complete mention history.", t)))
+        .when(route.kind === "channel" && !!route.before, e => e.child(button("latest", "Back to latest", t, (_e, cx) => this.navigate({ kind: "channel", channel: route.channel }, cx), !this.pending && !this.sending)))
+        .child(v_flex().id("hboard-feed").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.feedScroll).child(this.content(t)))
+        .when(!!this.readError, e => e.child(div().text_color(t.blocked ?? t.foreground).child("Read failed" + (this.data ? " (last loaded data)" : "") + ": " + this.readError)))
+        .when(isGeneral(route) && !!this.readError, e => e.child(label("General is unavailable. Retry or select an existing channel in the sidebar. No channel was created.", t)))
+        .when(terminalVisible && !!this.bound, e => e.child(label("Native terminal · " + (terminals().find(t => t.address === this.bound.address && t.state === "live" && t.program?.agent)?.status ?? "not live / unknown") + " · binding is not proof of Session liveness", t)))
+        .when(terminalVisible && !!this.detail && !!this.pending, e => e.child(label("A send is unconfirmed in the selected thread. Return to the thread to reconcile it.", t)))
+        .when(!this.detail && !!this.sent, e => e.child(label(this.sent, t)))
+        .when(showComposer, e => e.child(this.composer(t))))
+      .when(!!this.actionError && !panes.showThread, e => e.child(div().text_color(t.blocked ?? t.foreground).child(this.actionError)));
+  }
+
+  threadPane(t, panes) {
+    const route = this.detail, data = this.detailData, thread = data?.message;
+    return this.panel(t)
+      .when(panes.split, e => e.w(UI.detail).flex_none())
+      .when(!panes.split, e => e.flex_1())
+      .child(h_flex().items_center().gap(UI.gap).flex_none()
+        .when(panes.compact, e => e.child(this.menuButton(t)))
+        .child(div().flex_1().min_w(0).truncate().font_semibold().text_size(UI.heading).child("Thread"))
+        .child(button("thread-refresh", this.detailLoading ? "Reading…" : "Refresh", t, (_e, cx) => this.refreshDetail(cx), !this.detailLoading && !this.sending))
+        .child(button("thread-close", panes.split ? "Close" : "Back", t, (_e, cx) => this.closeThread(cx), !this.pending && !this.sending)))
+      .child(label("# " + route.channel, t))
+      .when(!!thread, e => e.child(h_flex().items_center().gap(UI.gap)
+        .child(button("mark-read", "Mark read", t, (_e, cx) => { this.prefs = readMarker(this.prefs, threadSummary(this.detailData)); this.savePrefs(); cx.notify(); }))
+        .child(button("follow", this.prefs.followed.some(x => x.id === thread.id) ? "Unfollow" : "Follow", t, (_e, cx) => { this.prefs = toggleFollow(this.prefs, thread); this.savePrefs(); cx.notify(); }))))
+      .child(v_flex().id("hboard-thread").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.threadScroll)
+        .child(data ? v_flex().gap(UI.pad).children([data.message, ...data.replies].map(m => this.message(m, t))) : label(this.detailLoading ? "Reading thread…" : "No thread loaded", t)))
+      .when(!!this.detailReadError, e => e.child(div().text_color(t.blocked ?? t.foreground).child("Thread read failed: " + this.detailReadError)))
+      .when(!!this.sent, e => e.child(label(this.sent, t)))
+      .when(this.canCompose() || !!this.pending, e => e.child(this.composer(t)))
+      .when(!!this.actionError, e => e.child(div().text_color(t.blocked ?? t.foreground).child(this.actionError)));
   }
 
   render() {
-    const t = theme(), connected = !!this.scope, route = this.route;
-    const title = route.kind === "thread" ? "Thread · #" + route.channel : isGeneral(route) ? "General" : route.kind === "channel" ? "# " + route.channel : route.kind === "following" ? "Following" : "Inbox · mentions";
-    const nativeTerminal = terminalPane(layout());
-    const thread = route.kind === "thread" ? this.data?.message : null;
-    const bound = this.bound && terminals().find(t => t.address === this.bound.address && t.state === "live" && t.program?.agent);
-    return h_flex().id("hboard-root").size_full().min_h(0).min_w(0).bg(t.background).text_color(t.foreground).text_size(UI.text)
-      .child(this.sidebar(t))
-      .child(v_flex().flex_1().h_full().min_w(0).min_h(0).p(UI.pad).gap(UI.gap)
-        .child(h_flex().items_center().gap(UI.gap).flex_none()
-          .child(div().flex_1().min_w(0).truncate().font_semibold().text_size(UI.heading).child(connected ? title : "Connect Board"))
-          .when(connected, e => e.child(button("refresh", this.loading ? "Reading…" : "Refresh", t, (_e, cx) => this.refresh(cx), !this.loading && !this.sending && route.kind !== "following")))
-          .when(!connected, e => e.child(button("connect", this.connecting ? "Connecting…" : "Connect", t, (_e, cx) => this.connect(cx), !this.connecting, true)))
-          .when(!!nativeTerminal && !nativeTerminal.hidden, e => e.child(button("hide-terminal", "Hide terminal", t, (_e, cx) => {
-            // Hiding a layout node leaves the native agent process running.
-            this.focusSeq++;
-            this.focusing = null;
-            run("layout.hide", { id: "hboard-terminal" });
-            cx.notify();
-          })))
-          .child(button("herdr", "Herdr", t, () => run("layout.switch", { name: "main" }))))
-        .when(!connected, e => e.child(v_flex().gap(UI.gap).flex_none()
-          .child(label("Use the existing Vercel CLI login, as a human, or enter a Board endpoint. No credentials are stored here.", t))
-          .child(Input.new(this.endpoint).h(36).px(UI.gap).rounded(UI.radius).border_1().border_color(t.input).bg(t.surface).text_color(t.foreground))))
-        .when(connected, e => e
-          .child(h_flex().items_center().gap(UI.gap).flex_none()
-            .child(div().flex_1().min_w(0).truncate().text_size(UI.small).text_color(t.dim).child(this.scope.board))
-            .child(button("directory", "Sync directory", t, (_e, cx) => this.syncDirectory(cx), !this.loadingChannels && !this.sending)))
-          .when(!!nativeTerminal && !nativeTerminal.hidden && !!this.bound, e => e.child(label("Bound terminal " + this.bound.address + " · " + (bound?.status ?? "not live / unknown") + " · claim is not proof of Session liveness", t)))
-          .when(route.kind === "thread", e => e.child(h_flex().gap(UI.gap)
-            .child(button("back", "Channel", t, (_e, cx) => this.navigate({ kind: "channel", channel: route.channel }, cx), !this.pending && !this.sending))
-            .when(!!thread, e => e.child(button("mark-read", "Mark read", t, (_e, cx) => { this.prefs = readMarker(this.prefs, threadSummary(this.data)); this.savePrefs(); cx.notify(); })))
-            .when(!!thread, e => e.child(button("follow", this.prefs.followed.some(x => x.id === thread.id) ? "Unfollow" : "Follow", t, (_e, cx) => { this.prefs = toggleFollow(this.prefs, thread); this.savePrefs(); cx.notify(); })))))
-          .when(route.kind === "inbox", e => e.child(label(this.inboxNote || "Inbox covers only loaded channels and is not a complete mention history.", t)))
-          .when(route.kind === "channel" && !!route.before, e => e.child(button("latest", "Back to latest", t, (_e, cx) => this.navigate({ kind: "channel", channel: route.channel }, cx), !this.pending && !this.sending)))
-          .child(v_flex().id("hboard-content").flex_1().min_h(0).overflow_y_scrollbar().child(this.content(t)))
-          .when(!!this.readError, e => e.child(div().text_color(t.blocked ?? t.foreground).child("Read failed" + (this.data ? " (last loaded data)" : "") + ": " + this.readError)))
-          .when(isGeneral(route) && !!this.readError, e => e.child(label("General is unavailable. Retry or select an existing channel in the sidebar. No channel was created.", t)))
-          .when(!!this.sent, e => e.child(label(this.sent, t)))
-          .when(this.canCompose() || !!this.pending, e => e.child(this.composer(t))))
-        .when(!!this.actionError, e => e.child(div().text_color(t.blocked ?? t.foreground).child(this.actionError))));
+    const t = theme();
+    const terminalVisible = this.terminalVisible();
+    const panes = workspacePanes(this.viewportWidth, !!this.detail, terminalVisible, this.menuOpen);
+    return h_flex().id("hboard-root").size_full().min_h(0).min_w(0).gap(UI.gap).bg(t.canvas).text_color(t.foreground).text_size(UI.text)
+      .on_size_change((size, cx) => {
+        if (size.width !== this.viewportWidth) { this.viewportWidth = size.width; cx.notify(); }
+      })
+      .when(panes.showNav, e => e.child(this.sidebar(t, panes.compact)))
+      .when(panes.showFeed, e => e.child(this.feedPane(t, panes, terminalVisible)))
+      .when(panes.showThread, e => e.child(this.threadPane(t, panes)));
   }
 }

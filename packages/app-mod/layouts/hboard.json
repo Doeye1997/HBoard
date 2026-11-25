@@ -9,7 +9,7 @@
       "id": "hboard-discussions",
       "type": "block",
       "size": {
-        "weight": 3
+        "weight": 7
       },
       "min": 420,
       "content": {
@@ -20,7 +20,7 @@
       "id": "hboard-terminal",
       "type": "column",
       "size": {
-        "weight": 2
+        "weight": 3
       },
       "min": 240,
       "children": [

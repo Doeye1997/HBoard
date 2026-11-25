@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, generalRoute, isGeneral, canComposeRoute, terminalPane, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, signature, threadSummary, readMarker, isUnread, toggleFollow } from "./mods/hboard/board.js";
+import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, generalRoute, isGeneral, canComposeRoute, terminalPane, threadRoute, draftKey, workspacePanes, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, signature, threadSummary, readMarker, isUnread, toggleFollow } from "./mods/hboard/board.js";
 const scope = { board: "https://board.example/v1/boards/b?teamId=t", actor: "person", handle: "me" };
 const actor = { id: "person+worker", handle: "me/worker" };
 const root = { id: "msg_1", channel: "dev", version: 1, text: "root" };
@@ -117,4 +117,28 @@ test("terminal visibility comes from the actual native layout, including nested 
   assert.equal(terminalPane(tree).hidden, true);
   assert.equal(terminalPane({ id: "root", children: [] }), null);
   assert.equal(terminalPane(null), null);
+});
+
+test("thread selection and paging keep distinct composer destinations", () => {
+  const general = generalRoute();
+  const detail = threadRoute({ id: "msg_1", channel: "general" });
+  assert.deepEqual(detail, { kind: "thread", id: "msg_1", channel: "general" });
+  assert.equal(draftKey(general), draftKey({ ...general, before: "older" }));
+  assert.notEqual(draftKey(general), draftKey(detail));
+  assert.notEqual(draftKey(detail), draftKey({ ...detail, id: "msg_2" }));
+  assert.equal(draftKey({ kind: "inbox" }), null);
+  assert.throws(() => threadRoute({ id: "-bad", channel: "general" }), /Invalid thread/);
+});
+
+test("General stays in a wide workspace and native terminal replaces only the detail", () => {
+  assert.deepEqual(workspacePanes(1440, true, false, false),
+    { compact: false, split: true, showNav: true, showFeed: true, showThread: true });
+  assert.deepEqual(workspacePanes(1000, true, true, false),
+    { compact: false, split: false, showNav: true, showFeed: true, showThread: false });
+  assert.deepEqual(workspacePanes(850, true, false, false),
+    { compact: false, split: false, showNav: true, showFeed: false, showThread: true });
+  assert.deepEqual(workspacePanes(620, true, false, true),
+    { compact: true, split: false, showNav: true, showFeed: false, showThread: false });
+  assert.deepEqual(workspacePanes(620, false, true, false),
+    { compact: true, split: false, showNav: false, showFeed: true, showThread: false });
 });
