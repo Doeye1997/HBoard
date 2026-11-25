@@ -8,28 +8,41 @@
     {
       "id": "hboard-discussions",
       "type": "block",
-      "size": { "weight": 3 },
+      "size": {
+        "weight": 7
+      },
       "min": 420,
-      "content": { "mod": "hboard" }
+      "content": {
+        "mod": "hboard"
+      }
     },
     {
       "id": "hboard-terminal",
       "type": "column",
-      "size": { "weight": 2 },
+      "size": {
+        "weight": 3
+      },
       "min": 240,
       "children": [
         {
           "id": "tabs",
           "type": "block",
-          "size": { "px": 42 },
-          "content": { "mod": "tabs" }
+          "size": {
+            "px": 42
+          },
+          "content": {
+            "mod": "tabs"
+          }
         },
         {
           "id": "main",
           "type": "block",
-          "content": { "agent": "focused" }
+          "content": {
+            "agent": "focused"
+          }
         }
-      ]
+      ],
+      "hidden": true
     }
   ]
 }
