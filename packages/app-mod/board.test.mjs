@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, generalRoute, isGeneral, canComposeRoute, terminalPane, threadRoute, draftKey, workspacePanes, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, signature, threadSummary, readMarker, isUnread, toggleFollow, safeMarkdown, reactionsFor, attachmentRows, messageInThread, reactionArgs, downloadArgs, nativeTask, visibleLabels } from "./mods/hboard/board.js";
+import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, generalRoute, isGeneral, canComposeRoute, terminalPane, threadRoute, draftKey, workspacePanes, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, signature, threadSummary, readMarker, isUnread, toggleFollow, safeMarkdown, reactionsFor, attachmentRows, messageInThread, reactionArgs, downloadArgs, nativeTask, visibleLabels, channelPermission, taskListArgs, taskAction } from "./mods/hboard/board.js";
 const scope = { board: "https://board.example/v1/boards/b?teamId=t", actor: "person", handle: "me" };
 const actor = { id: "person+worker", handle: "me/worker" };
 const root = { id: "msg_1", channel: "dev", version: 1, text: "root" };
@@ -182,4 +182,22 @@ test("task and labels are read projections, not a local task state machine", () 
   assert.equal(nativeTask({ labels: { kind: "task" } }), null);
   assert.deepEqual(visibleLabels(m, true), [["project","JSON"],["kind","review"]]);
   assert.deepEqual(visibleLabels(m, false), [["project","JSON"],["kind","review"],["custom","x"]]);
+});
+
+test("Task create uses native idempotency and channel capability check", () => {
+  const intent = createSend(scope, generalRoute(), "ship it", "task-key", "task");
+  assert.deepEqual(sendArgs(intent), ["board","tasks","--url",scope.board,"--json","--idempotency-key","task-key","--","create","general","ship it"]);
+  assert.throws(() => createSend(scope,{kind:"thread",id:"msg_1"},"task","k","task"),/Open a channel/);
+  assert.deepEqual(taskListArgs("general"),{flags:["--state","all","--limit","1"],args:["general"]});
+  assert.throws(() => taskListArgs("create"),/conflicts/);
+});
+
+test("Task controls respect observed owner and permission hints", () => {
+  const me={principal:"person",can:{"*":["label","post"],"private/":[]}};
+  const root={id:"msg_1",channel:"general",task:{owner:"person",state:"blocked"}};
+  assert.equal(channelPermission(me,"private/x","label"),false);
+  assert.deepEqual(taskAction(scope,me,root,"unblock").args,["board","tasks","--url",scope.board,"--json","--","unblock","msg_1"]);
+  assert.throws(() => taskAction(scope,{...me,principal:"other"},root,"unblock"),/unavailable/);
+  assert.equal(taskAction(scope,me,{id:"msg_1",channel:"general"},"convert").outcome,"created");
+  assert.throws(() => taskAction(scope,me,root,"reopen"),/unavailable/);
 });

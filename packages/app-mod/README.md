@@ -69,3 +69,7 @@ On the updated personal layout, inspect General at a 1440×900 window and at a n
 ### Native evidence/feedback candidate checks
 
 Open a thread with ordinary Markdown, a safe HTTP(S) link, an attachment and a reaction. Verify Markdown is native text and HTML/image syntax is plain (no automatic image request). Choose an actual folder with Save; the official CLI download gets an attachment ID and no filename, so the upstream exclusive-create rule remains in force. Existing files must not be overwritten. Add/remove a reaction as the human and compare the authoritative thread readback. Verify a real task root renders its actual state/reason/result and project/kind labels; if task details are absent, show unavailable, never infer a local state. Attachment upload remains available through the official Board skill/CLI until its UI send/retry contract is resolved. Task writes remain pending actual installed hosted capability verification.
+
+### Native task write candidate
+
+Task creation uses official idempotency keys; conversion, unblock and reopen require a fresh identity, actual tasks-list capability, matching thread version and native receipt/readback. These are candidate controls, not host-verified. Assignment, prerequisites, block/cancel, conditional labels, native task filters and live events remain pending. Agent claim/settlement stays in the official Board CLI; no automatic intake or dispatch is added.

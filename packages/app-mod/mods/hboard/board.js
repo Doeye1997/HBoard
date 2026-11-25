@@ -140,11 +140,12 @@ export function dedupeThreads(threads) {
   return [...byId.values()].sort((a, b) => String(b?.message?.createdAt ?? "").localeCompare(String(a?.message?.createdAt ?? "")));
 }
 
-export function createSend(scope, route, text, key) {
+export function createSend(scope, route, text, key, kind = "message") {
   if (typeof text !== "string" || !text.trim() || text.trim() === "-" || text.includes("\0") || text.length > 10000) {
     throw Error("Enter a message of 1–10,000 characters (a lone '-' is reserved by the CLI)");
   }
-  const command = route.kind === "thread" ? "reply" : route.kind === "channel" ? "post" : null;
+  const command = kind === "task" && route.kind === "channel" ? "task-create"
+    : kind === "message" ? (route.kind === "thread" ? "reply" : route.kind === "channel" ? "post" : null) : null;
   if (!command) throw Error("Open a channel or thread to send");
   const target = command === "reply" ? route.id : route.channel;
   if (typeof target !== "string" || !target || target.startsWith("-") || !key) throw Error("Invalid message destination");
@@ -152,6 +153,8 @@ export function createSend(scope, route, text, key) {
 }
 
 export function sendArgs(intent) {
+  if (intent.command === "task-create") return argv("tasks", { board: intent.scope.board,
+    flags: ["--idempotency-key", intent.key], args: ["create", intent.target, intent.text] });
   return argv(intent.command, { board: intent.scope.board,
     flags: ["--idempotency-key", intent.key], args: [intent.target, intent.text] });
 }
@@ -197,7 +200,7 @@ export function messageName(message, actors) {
 
 export function signature(summary) {
   const m = summary.message, last = summary.last;
-  return JSON.stringify([m.id, m.revision ?? m.version, last?.id ?? null, last?.revision ?? last?.version ?? null, summary.replies]);
+  return JSON.stringify([m.id, m.version ?? m.revision, last?.id ?? null, last?.version ?? last?.revision ?? null, summary.replies]);
 }
 
 export function threadSummary(thread) {
@@ -236,7 +239,7 @@ export function reactionsFor(message, actor, offer = false) {
   for (const [name, members] of Object.entries(values)) {
     if (!/^[a-z0-9_+-]{1,80}$/.test(name) || !Array.isArray(members) || !members.every(id => typeof id === "string")) continue;
     const actors = [...new Set(members)];
-    if (actors.length || offer) rows.push({ name, title: FEEDBACK[name] ?? ":" + name + ":", actors, count: actors.length, own: actors.includes(actor) });
+    if (actors.length || offer) rows.push({ name, title: Object.hasOwn(FEEDBACK, name) ? FEEDBACK[name] : ":" + name + ":", actors, count: actors.length, own: actors.includes(actor) });
   }
   if (offer) for (const [name, title] of Object.entries(FEEDBACK)) {
     if (!rows.some(r => r.name === name)) rows.push({ name, title, actors: [], count: 0, own: false });
@@ -277,7 +280,7 @@ export function nativeTask(message) {
   if (message?.deleted) return null;
   const t = message?.task;
   if (!t || typeof t !== "object" || !TASK_STATES.has(t.state)) {
-    return message?.labels?.["board.task"] !== undefined ? { unavailable: true } : null;
+    return t != null || message?.labels?.["board.task"] !== undefined ? { unavailable: true } : null;
   }
   // Read only the public projection, never propagate claim secrets or infer
   // readiness from time, labels or dependencies on the client.
@@ -295,4 +298,34 @@ export function visibleLabels(message, compact) {
   return Object.entries(message.labels).filter(([key, value]) => typeof value === "string" &&
     /^[a-z0-9][a-z0-9_.-]{0,63}$/.test(key) &&
     key !== "board.task" && (!compact || key === "project" || key === "kind"));
+}
+
+// Permission hints from whoami; Board remains the authorization boundary.
+export function channelPermission(me, channel, permission) {
+  const can = me?.can;
+  if (!can || typeof can !== "object" || Array.isArray(can)) return false;
+  const pattern = Object.keys(can).filter(k => k === channel || k === "*" ||
+    (k.endsWith("/") && (channel === k.slice(0,-1) || channel.startsWith(k))))
+    .sort((a,b) => (b === channel ? 100000 : b === "*" ? 0 : b.length) -
+      (a === channel ? 100000 : a === "*" ? 0 : a.length))[0];
+  const grants = pattern === undefined ? null : can[pattern];
+  return Array.isArray(grants) && (grants.includes(permission) || grants.includes("manage"));
+}
+
+export function taskListArgs(channel) {
+  const name = channelName(channel);
+  if (["create","claim","run","renew","release","complete","fail","block","unblock","reopen","assign","needs","cancel"].includes(name)) throw Error("Channel conflicts with a native tasks command");
+  return { flags: ["--state","all","--limit","1"], args: [name] };
+}
+
+export function taskAction(scope, me, root, verb) {
+  if (!root || root.deleted || typeof root.id !== "string" || !root.id || root.id.startsWith("-") || root.re != null) throw Error("Thread root unavailable");
+  const task = nativeTask(root);
+  if (verb === "convert" && task === null && channelPermission(me, root.channel, "label")) {
+    return {args:argv("tasks",{board:scope.board,args:["create",root.id]}), outcome:"created"};
+  }
+  const owner = task && !task.unavailable && (channelPermission(me, root.channel, "manage") ||
+    (!!me?.principal && task.owner === me.principal && channelPermission(me, root.channel, "label")));
+  if (!owner || !((verb === "unblock" && task.state === "blocked") || (verb === "reopen" && task.state === "failed"))) throw Error("Task action is unavailable for this identity and state");
+  return {args:argv("tasks",{board:scope.board,args:[verb,root.id]}), outcome:verb === "unblock" ? "unblocked" : "reopened"};
 }

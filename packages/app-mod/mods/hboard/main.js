@@ -1,7 +1,7 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, ScrollHandle, TextView } from "gpui-base";
 import { exec, appHome, checking, props, run, theme, terminals, window, layout, pickFolder } from "herdr";
-import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, generalRoute, isGeneral, canComposeRoute, terminalPane, threadRoute, draftKey, workspacePanes, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, messageName, threadSummary, readMarker, isUnread, toggleFollow, safeMarkdown, reactionsFor, attachmentRows, messageInThread, reactionArgs, downloadArgs, nativeTask, visibleLabels } from "./board.js";
+import { canonicalBoard, humanScope, sameHuman, argv, boardInvocation, generalRoute, isGeneral, canComposeRoute, terminalPane, threadRoute, draftKey, workspacePanes, readArgs, inboxMentionArgs, inboxPageArgs, mentionsHuman, inboxCoverage, dedupeThreads, createSend, sendArgs, parseReply, actorProfile, bindingTarget, messageName, threadSummary, readMarker, isUnread, toggleFollow, safeMarkdown, reactionsFor, attachmentRows, messageInThread, reactionArgs, downloadArgs, nativeTask, visibleLabels, channelPermission, taskListArgs, taskAction } from "./board.js";
 
 // Adopt the Herdr native theme and the spacing/typography scale of its panels.
 const UI = { rail: 208, detail: 416, pad: 16, gap: 8, row: 32, radius: 10, small: 12, text: 14, heading: 20, composer: 72, avatar: 32 };
@@ -36,6 +36,7 @@ async function resolveBoardCli() {
 export default class HBoard extends View {
   init(_props, cx) {
     this.scope = null;
+    this.authority = null;
     this.transport = null;
     this.channels = [];
     this.actors = [];
@@ -107,11 +108,13 @@ export default class HBoard extends View {
       try {
         this.transport = await resolveBoardCli();
         const scope = humanScope(await this.cli("whoami", entered ? canonicalBoard(entered) : undefined));
-        const pinned = humanScope(await this.cli("whoami", scope.board));
+        const authority = await this.cli("whoami", scope.board);
+        const pinned = humanScope(authority);
         if (!sameHuman(scope, pinned)) throw Error("Board identity changed while connecting");
         const directory = await this.directory(scope);
         if (seq !== this.seq) return;
         this.scope = scope;
+        this.authority = authority;
         this.channels = directory.channels;
         this.nextChannel = directory.next;
         this.actors = directory.actors;
@@ -357,31 +360,44 @@ export default class HBoard extends View {
       this.detail ? this.detailReadError : this.readError);
   }
 
-  send(cx) {
+  async requireTasks(scope, channel) {
+    const result = await this.cli("tasks", scope.board, taskListArgs(channel));
+    array(result.tasks, "tasks");
+  }
+
+  send(cx, kind = "message") {
     if (checking() || this.sending || (!this.pending && !this.canCompose())) return;
     let intent;
     try {
       intent = this.pending ?? createSend(this.scope, this.composeRoute(), this.draft.value(),
-        "hboard-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2) + "-" + Math.random().toString(36).slice(2));
+        "hboard-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2) + "-" + Math.random().toString(36).slice(2), kind);
     } catch (error) { this.actionError = errorText(error); cx.notify(); return; }
     const previouslyUnconfirmed = !!this.pending;
     this.pending = intent; this.sending = true; this.actionError = ""; this.sent = ""; cx.notify();
     cx.spawn(async cx => {
       let invoked = false;
       try {
-        const human = humanScope(await this.cli("whoami", intent.scope.board));
+        const authority = await this.cli("whoami", intent.scope.board);
+        const human = humanScope(authority);
         if (!sameHuman(human, intent.scope) || !sameHuman(this.scope, intent.scope)) throw Error("Board identity changed; send refused");
+        this.authority = authority;
+        if (intent.command === "task-create") {
+          if (!channelPermission(authority, intent.target, "post")) throw Error("Post permission required");
+          await this.requireTasks(intent.scope, intent.target);
+        }
         invoked = true;
         const result = parseReply(await this.execBoard(sendArgs(intent)), intent.command);
-        const m = result.message;
-        if (result.outcome !== "posted" || typeof m?.id !== "string" || m.by?.actor !== intent.scope.actor ||
-            (intent.command === "post" ? m.channel !== intent.target : m.re !== intent.target && m.replyTo !== intent.target)) {
+        const creating = intent.command === "task-create";
+        const m = creating ? result.task : result.message;
+        if (result.outcome !== (creating ? "created" : "posted") || typeof m?.id !== "string" || m.by?.actor !== intent.scope.actor ||
+            (intent.command === "reply" ? m.re !== intent.target && m.replyTo !== intent.target : m.channel !== intent.target) ||
+            (creating && (!nativeTask(m) || nativeTask(m).unavailable))) {
           throw Error("No matching canonical Board receipt");
         }
         this.pending = null;
         this.draft.set_value("");
         this.drafts.delete(draftKey(this.composeRoute()));
-        this.sent = intent.command === "reply" ? "Reply posted" : "Posted";
+        this.sent = creating ? "Task created. Open it to notify an Agent explicitly." : intent.command === "reply" ? "Reply posted" : "Posted";
       } catch (error) {
         if (!invoked && !previouslyUnconfirmed) this.pending = null;
         this.actionError = (this.pending ? "Send unconfirmed. Check the thread before retrying the same operation. " : "") + errorText(error);
@@ -429,7 +445,7 @@ export default class HBoard extends View {
         const snapshot = await this.cli("read", scope.board, readArgs(route));
         if (snapshot.message?.id !== route.id || snapshot.message.channel !== route.channel || !Array.isArray(snapshot.replies)) throw Error("Invalid thread readback");
         const changed = messageInThread(snapshot, id);
-        if (!changed || changed.deleted || !changed.reactions || typeof changed.reactions !== "object") throw Error("Reaction readback unavailable");
+        if (!changed || changed.deleted || !changed.reactions || typeof changed.reactions !== "object" || Array.isArray(changed.reactions)) throw Error("Reaction readback unavailable");
         const observed = reactionsFor(changed, scope.actor).find(r => r.name === name)?.own ?? false;
         if (observed !== !remove) throw Error("Reaction differs from requested state; reread Board");
         this.detailSeq++;
@@ -478,6 +494,47 @@ export default class HBoard extends View {
         cx.notify();
       }
     });
+  }
+
+  changeTask(cx, verb) {
+    if (checking() || this.pending || this.sending || !this.scope || !this.detail) return;
+    const scope = this.scope, route = this.detail, root = this.detailMessage(route.id);
+    if (!root || !Number.isInteger(root.version)) return;
+    this.sending = true; this.nativeAction = true; this.actionError = ""; this.sent = ""; cx.notify();
+    cx.spawn(async cx => {
+      try {
+        const me = await this.cli("whoami", scope.board);
+        if (!sameHuman(humanScope(me), scope) || !sameHuman(scope, this.scope)) throw Error("Board identity changed; task write refused");
+        this.authority = me;
+        await this.requireTasks(scope, route.channel);
+        const before = await this.cli("read", scope.board, readArgs(route));
+        if (before.message?.id !== root.id || before.message.channel !== route.channel || before.message.version !== root.version) throw Error("Thread changed; reread before applying this action");
+        const op = taskAction(scope, me, before.message, verb);
+        const result = parseReply(await this.execBoard(op.args), "tasks " + verb);
+        if (result.task?.id !== root.id || result.outcome !== op.outcome) throw Error("No matching native task receipt");
+        const after = await this.cli("read", scope.board, readArgs(route));
+        const task = nativeTask(after.message);
+        if (after.message?.id !== root.id || after.message.channel !== route.channel || !Array.isArray(after.replies) ||
+            !task || task.unavailable || (verb !== "convert" && !["ready","waiting"].includes(task.state))) throw Error("Native task readback differs");
+        this.detailSeq++; this.detailLoading = false; this.detailData = after;
+        this.sent = "Task updated · " + task.state;
+      } catch (error) {
+        this.actionError = "Update not confirmed. Read Board before trying again. " + errorText(error);
+      } finally {
+        this.nativeAction = false; this.sending = false;
+        this.seq++; this.loading = false; this.detailSeq++; this.detailLoading = false;
+        if (!this.route.before) this.refresh(cx);
+        if (this.detail) this.refreshDetail(cx);
+        cx.notify();
+      }
+    });
+  }
+
+  taskControls(root, t) {
+    const actions = [["convert","Make task"],["unblock","Unblock"],["reopen","Reopen"]].filter(([verb]) => {
+      try { taskAction(this.scope, this.authority, root, verb); return true; } catch { return false; }
+    });
+    return h_flex().gap(4).children(actions.map(([verb,title]) => button("task-" + verb,title,t,(_e,cx) => this.changeTask(cx,verb),!this.pending && !this.sending)));
   }
 
   actorLabel(id) {
@@ -619,7 +676,8 @@ export default class HBoard extends View {
       .child(h_flex().gap(UI.gap).items_center()
         .child(div().flex_1())
         .when(!!this.pending && !this.sending, e => e.child(button("forget", "Forget unconfirmed send", t, (_e, cx) => { this.pending = null; this.actionError = "Unconfirmed send forgotten locally. Check Board before posting again."; cx.notify(); })))
-        .child(button("send", this.sending ? (this.nativeAction ? "Updating…" : "Sending…") : this.pending ? "Retry same send" : route.kind === "thread" ? "Reply" : "Post", t, (_e, cx) => this.send(cx), !this.sending && (!!this.pending || !!this.draft.value().trim()), true)));
+        .when(!this.pending && route.kind === "channel" && channelPermission(this.authority, route.channel, "post"), e => e.child(button("create-task", "Create task", t, (_e,cx) => this.send(cx, "task"), !this.sending && !!this.draft.value().trim())))
+        .child(button("send", this.sending ? (this.nativeAction ? "Updating…" : "Sending…") : this.pending ? (this.pending.command === "task-create" ? "Retry same task" : "Retry same send") : route.kind === "thread" ? "Reply" : "Post", t, (_e, cx) => this.send(cx), !this.sending && (!!this.pending || !!this.draft.value().trim()), true)));
   }
 
   menuButton(t) {
@@ -678,6 +736,7 @@ export default class HBoard extends View {
         .child(button("follow", this.prefs.followed.some(x => x.id === thread.id) ? "Unfollow" : "Follow", t, (_e, cx) => { this.prefs = toggleFollow(this.prefs, thread); this.savePrefs(); cx.notify(); }))))
       .child(v_flex().id("hboard-thread").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.threadScroll)
         .child(data ? v_flex().gap(UI.pad).children([data.message, ...data.replies].map(m => this.message(m, t))) : label(this.detailLoading ? "Reading thread…" : "No thread loaded", t)))
+      .when(!!thread && !thread.deleted && !this.detailReadError, e => e.child(this.taskControls(thread, t)))
       .when(!!this.detailReadError, e => e.child(div().text_color(t.blocked ?? t.foreground).child("Thread read failed: " + this.detailReadError)))
       .when(!!this.sent, e => e.child(label(this.sent, t)))
       .when(this.canCompose() || !!this.pending, e => e.child(this.composer(t)))
