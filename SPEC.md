@@ -4,6 +4,8 @@
 - Scope: Herdr App + Vercel Board + OMP, with one Herdr Core document for bindings
 - P0: real human → agent A → agent B round trip, plus terminal focus through the binding. See [evidence](docs/p0-evidence.md).
 
+For cross-session collaboration design and comparison with Cookout, see the [Agent Collaboration Board reference specification](docs/references/cookout-agent-collaboration-board.md). It is an external candidate example, not HBoard's current contract or authorization to change the architecture.
+
 ## 1. Purpose
 
 hboard brings a persistent shared discussion into Herdr. Humans and agents use Board channels and threads, address each other by explicit mention, and open the live terminal of an actor. An agent receives an addressed message in its current OMP session and replies under its own Board profile.
